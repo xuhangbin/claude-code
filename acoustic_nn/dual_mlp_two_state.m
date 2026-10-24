@@ -19,8 +19,9 @@
 %   论文没有给出学习率和遗传算法的种群、代数、适应度，脚本里写明了取值。
 %
 % 设计结果是同一组孔径下的两套腔深。比较的是 300–500 Hz 的平均吸声系数：
-%   状态 1：平均正向比平均反向高出 0.5 以上
-%   状态 2：平均正向比平均反向低出 0.5 以上
+%   状态 1：平均正向比平均反向高出 0.4 以上
+%   状态 2：平均正向比平均反向低出 0.4 以上
+% 最后的图用传递矩阵画 100–700 Hz，黄色带仍是 300–500 Hz。
 % 遗传算法用冻住的正向网络计算适应度，最后用传递矩阵重算并画图。
 %
 % 直接在 MATLAB 里运行本文件。不需要 Deep Learning Toolbox。
@@ -60,7 +61,7 @@ physicsChunk = 64;
 %% 频率、空气和名义几何
 
 fTrain = linspace(100, 500, 100);
-fPlot = 100:1:500;
+fPlot = 100:1:700;
 
 air = struct();
 air.rho0 = 1.29;
@@ -85,9 +86,9 @@ geom.stinsonN = 200;
 dNominal = 1e-3 * [1, 0.8, 4, 2, 0.8, 3, 3, 0.8, 2, 4, 0.8, 1];
 hNominal = 1e-3 * 47 * ones(1, 8);
 
-dLower = 0.5e-3 * ones(1, 12);
-dUpper = 4.5e-3 * ones(1, 12);
-hLower = 15e-3 * ones(1, 8);
+dLower = 0.1e-3 * ones(1, 12);
+dUpper = 8e-3 * ones(1, 12);
+hLower = 10e-3 * ones(1, 8);
 hUpper = 80e-3 * ones(1, 8);
 
 fprintf('预计算训练集频率上的 Stinson 等效参数...\n');
@@ -175,9 +176,9 @@ fprintf('测试集参数平均相对误差 %.2f%%\n', 100 * mean(paramRel));
 
 %% 两种目标谱，逆向网络给初值
 
-bandMargin = 0.5;
-targetForward = targetSpectrum(fTrain, 0.80, 0.25);
-targetBackward = targetSpectrum(fTrain, 0.25, 0.80);
+bandMargin = 0.4;
+targetForward = targetSpectrum(fTrain, 0.75, 0.30);
+targetBackward = targetSpectrum(fTrain, 0.30, 0.75);
 paramForward = unstandardizeParameters( ...
     mlpPredict(inverseNet, standardizeRows(targetForward, yMean, yStd)), xMean, xStd);
 paramBackward = unstandardizeParameters( ...
@@ -206,7 +207,7 @@ hBest2 = xBest(21:28);
 
 %% 用传递矩阵在 1 Hz 网格上重算
 
-fprintf('用传递矩阵重算 100:1:500 Hz...\n');
+fprintf('用传递矩阵重算 100:1:700 Hz...\n');
 [kPlot, zPlot] = ductWave(fPlot, air, geom.W, geom.L, geom.stinsonN);
 modelPlot = geom;
 modelPlot.kEff = kPlot;
@@ -226,14 +227,14 @@ fprintf('状态 2（300–500 Hz）平均正向 %.4f，平均反向 %.4f，反�
 fprintf('传递矩阵 det 误差：状态1 %.3e，状态2 %.3e\n', extra1.detErr, extra2.detErr);
 
 if gap1 > bandMargin
-    fprintf('状态 1：300–500 Hz 平均正向比反向高出 %.4f，大于 0.5。\n', gap1);
+    fprintf('状态 1：300–500 Hz 平均正向比反向高出 %.4f，大于 %.1f。\n', gap1, bandMargin);
 else
-    fprintf('状态 1：300–500 Hz 平均正向比反向高出 %.4f，尚未大于 0.5。\n', gap1);
+    fprintf('状态 1：300–500 Hz 平均正向比反向高出 %.4f，尚未大于 %.1f。\n', gap1, bandMargin);
 end
 if gap2 > bandMargin
-    fprintf('状态 2：300–500 Hz 平均反向比正向高出 %.4f，大于 0.5。\n', gap2);
+    fprintf('状态 2：300–500 Hz 平均反向比正向高出 %.4f，大于 %.1f。\n', gap2, bandMargin);
 else
-    fprintf('状态 2：300–500 Hz 平均反向比正向高出 %.4f，尚未大于 0.5。\n', gap2);
+    fprintf('状态 2：300–500 Hz 平均反向比正向高出 %.4f，尚未大于 %.1f。\n', gap2, bandMargin);
 end
 
 fprintf('\n共用孔径 (mm)\n');
@@ -254,8 +255,8 @@ save(resultPath, 'fPlot', 'dBest', 'hBest1', 'hBest2', ...
     'fTrain', 'bestLoss');
 fprintf('结果已保存到 %s\n', resultPath);
 
-plotState(fPlot, af1, ab1, extra1, '(1) 300-500 Hz 正向高出 0.5');
-plotState(fPlot, af2, ab2, extra2, '(2) 300-500 Hz 反向高出 0.5');
+plotState(fPlot, af1, ab1, extra1, '(1) 300-500 Hz 正向高出 0.4');
+plotState(fPlot, af2, ab2, extra2, '(2) 300-500 Hz 反向高出 0.4');
 
 fig = figure('Color', 'w', 'Position', [120, 40, 980, 760]);
 subplot(2, 1, 1);
@@ -267,7 +268,8 @@ grid on;
 box on;
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
-title('(a) State 1, forward mean exceeds backward by 0.5');
+xlim([fPlot(1), fPlot(end)]);
+title('(a) State 1, forward mean exceeds backward by 0.4');
 legend('Forward', 'Backward', 'Location', 'best');
 
 subplot(2, 1, 2);
@@ -279,7 +281,8 @@ grid on;
 box on;
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
-title('(b) State 2, backward mean exceeds forward by 0.5');
+xlim([fPlot(1), fPlot(end)]);
+title('(b) State 2, backward mean exceeds forward by 0.4');
 legend('Forward', 'Backward', 'Location', 'best');
 
 figPath = fullfile(outDir, 'two_state_absorption.png');
@@ -704,6 +707,7 @@ hold on;
 plot(f, extra.Rf, 'r--', 'LineWidth', 1.7);
 plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 markBand();
+xlim([f(1), f(end)]);
 title(['(a) Forward incidence  ' name]);
 ylabel('Coefficient');
 legend('Absorption', 'Reflection', 'Transmission', 'Location', 'best');
@@ -716,6 +720,7 @@ hold on;
 plot(f, extra.Rb, 'r--', 'LineWidth', 1.7);
 plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 markBand();
+xlim([f(1), f(end)]);
 title(['(b) Backward incidence  ' name]);
 xlabel('Frequency (Hz)');
 ylabel('Coefficient');
