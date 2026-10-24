@@ -5,9 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 from acoustic_nn.physics import (
+    feature_bounds,
     frequency_axis,
     identical_cell_error,
     nominal_geometry,
+    normalize_features,
     pack_geometry,
     transfer_response,
     unpack_geometry,
@@ -24,6 +26,9 @@ def main() -> None:
         raise AssertionError(f"相同单胞并联不一致，最大误差 {error:.3e}")
 
     diameter, thickness, depth = nominal_geometry()
+    normalized = normalize_features(pack_geometry(diameter, thickness, depth))
+    if np.any(normalized < -1e-8) or np.any(normalized > 1 + 1e-8):
+        raise AssertionError("名义几何不在训练盒子内")
     restored_d, restored_t, restored_h = unpack_geometry(
         pack_geometry(diameter, thickness, depth)
     )

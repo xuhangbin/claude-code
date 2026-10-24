@@ -32,13 +32,16 @@ N_CELLS = 4
 N_PLATES = 3
 N_CAVITIES = 2
 
-# 训练采样时使用的几何边界。名义设计落在这个盒子内部。
+# 物理上仍接受的硬边界。网络只在名义设计附近的相对盒子里训练。
 D_MIN_M = 0.10e-3
 D_MAX_M = 4.00e-3
 T_MIN_M = 0.50e-3
 T_MAX_M = 3.00e-3
 H_MIN_M = 20.0e-3
 H_MAX_M = 80.0e-3
+RELATIVE_DIAMETER = 0.25
+RELATIVE_THICKNESS = 0.20
+RELATIVE_DEPTH = 0.20
 
 # 每个单胞打包成 [d1, d2, d3, t1, t2, t3, H1, H2]
 FEATURES_PER_CELL = 8
@@ -102,17 +105,43 @@ def nominal_geometry() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def feature_bounds() -> tuple[np.ndarray, np.ndarray]:
-    """几何特征的下界和上界，形状 ``(32,)``，单位 m。"""
+    """名义几何附近的采样边界，形状 ``(32,)``，单位 m。
 
-    lower = np.array(
-        [D_MIN_M, D_MIN_M, D_MIN_M, T_MIN_M, T_MIN_M, T_MIN_M, H_MIN_M, H_MIN_M],
-        dtype=np.float64,
+    孔径相对名义值变化 ``±25%``，板厚 ``±20%``，腔深 ``±20%``，
+    并且不会越出微穿孔板模型使用的硬边界。全范围均匀采样在 32 维上
+    太稀，网络学不到共振随几何的移动；这个局部盒子是训练分布。
+    """
+
+    diameter, thickness, depth = nominal_geometry()
+    nominal = pack_geometry(diameter, thickness, depth)
+    relative = np.tile(
+        np.array(
+            [RELATIVE_DIAMETER] * N_PLATES
+            + [RELATIVE_THICKNESS] * N_PLATES
+            + [RELATIVE_DEPTH] * N_CAVITIES,
+            dtype=np.float64,
+        ),
+        N_CELLS,
     )
-    upper = np.array(
-        [D_MAX_M, D_MAX_M, D_MAX_M, T_MAX_M, T_MAX_M, T_MAX_M, H_MAX_M, H_MAX_M],
-        dtype=np.float64,
+    hard_lower = np.tile(
+        np.array(
+            [D_MIN_M] * N_PLATES + [T_MIN_M] * N_PLATES + [H_MIN_M] * N_CAVITIES,
+            dtype=np.float64,
+        ),
+        N_CELLS,
     )
-    return np.tile(lower, N_CELLS), np.tile(upper, N_CELLS)
+    hard_upper = np.tile(
+        np.array(
+            [D_MAX_M] * N_PLATES + [T_MAX_M] * N_PLATES + [H_MAX_M] * N_CAVITIES,
+            dtype=np.float64,
+        ),
+        N_CELLS,
+    )
+    lower = np.maximum(nominal * (1.0 - relative), hard_lower)
+    upper = np.minimum(nominal * (1.0 + relative), hard_upper)
+    if np.any(upper <= lower):
+        raise RuntimeError("几何采样边界退化")
+    return lower, upper
 
 
 def pack_geometry(
@@ -428,12 +457,11 @@ def sample_geometries(
     count: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """在训练边界内均匀抽取几何。"""
+    """在名义设计附近的边界内均匀抽取几何。"""
 
-    diameter = rng.uniform(D_MIN_M, D_MAX_M, size=(count, N_CELLS, N_PLATES))
-    thickness = rng.uniform(T_MIN_M, T_MAX_M, size=(count, N_CELLS, N_PLATES))
-    depth = rng.uniform(H_MIN_M, H_MAX_M, size=(count, N_CELLS, N_CAVITIES))
-    return diameter, thickness, depth
+    lower, upper = feature_bounds()
+    features = rng.uniform(lower, upper, size=(count, N_FEATURES))
+    return unpack_geometry(features)
 
 
 def spectra_targets(response: dict[str, np.ndarray]) -> np.ndarray:

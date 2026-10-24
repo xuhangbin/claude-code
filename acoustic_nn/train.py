@@ -96,7 +96,7 @@ def train(args: argparse.Namespace) -> Path:
     val_y_t = torch.tensor(val_y, dtype=torch.float32, device=device)
 
     model = SpectralSurrogate(n_freq=frequency.size).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     loss_fn = nn.MSELoss()
 
@@ -115,7 +115,7 @@ def train(args: argparse.Namespace) -> Path:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            total += float(loss) * index.numel()
+            total += float(loss.detach()) * index.numel()
             seen += index.numel()
         scheduler.step()
 
@@ -174,12 +174,13 @@ def train(args: argparse.Namespace) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练微穿孔板频谱代理网络")
-    parser.add_argument("--samples", type=int, default=4000)
-    parser.add_argument("--val-samples", type=int, default=500)
-    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--samples", type=int, default=8000)
+    parser.add_argument("--val-samples", type=int, default=1000)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--chunk", type=int, default=250)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--stinson-terms", type=int, default=200)

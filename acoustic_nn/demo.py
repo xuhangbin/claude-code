@@ -205,8 +205,10 @@ def run_demo(args: argparse.Namespace) -> None:
     print(np.array2string(opt_t * 1e3, precision=3, suppress_small=True))
     print("搜索后的腔深 mm:")
     print(np.array2string(opt_h * 1e3, precision=3, suppress_small=True))
+    geometry_path = Path(args.geometry_output)
+    geometry_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
-        Path(args.geometry_output),
+        geometry_path,
         diameter_m=opt_d,
         thickness_m=opt_t,
         depth_m=opt_h,
