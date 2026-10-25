@@ -270,30 +270,30 @@ plotState(fPlot, af2, ab2, extra2, '(2) 300-500 Hz 反向高出 0.4');
 
 fig = figure('Color', 'w', 'Position', [120, 40, 980, 760]);
 subplot(2, 1, 1);
-plot(fPlot, af1, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(fPlot, ab1, 'r--', 'LineWidth', 1.7);
 markBand();
+hF = plot(fPlot, af1, 'b-', 'LineWidth', 1.7);
+hB = plot(fPlot, ab1, 'r--', 'LineWidth', 1.7);
 grid on;
 box on;
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
 xlim([fPlot(1), fPlot(end)]);
-title('(a) State 1, forward mean exceeds backward by 0.4');
-legend('Forward', 'Backward', 'Location', 'best');
+title('状态1：蓝实线=正向吸声，红虚线=反向吸声');
+legend([hF, hB], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
 
 subplot(2, 1, 2);
-plot(fPlot, af2, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(fPlot, ab2, 'r--', 'LineWidth', 1.7);
 markBand();
+hF = plot(fPlot, af2, 'b-', 'LineWidth', 1.7);
+hB = plot(fPlot, ab2, 'r--', 'LineWidth', 1.7);
 grid on;
 box on;
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
 xlim([fPlot(1), fPlot(end)]);
-title('(b) State 2, backward mean exceeds forward by 0.4');
-legend('Forward', 'Backward', 'Location', 'best');
+title('状态2：蓝实线=正向吸声，红虚线=反向吸声');
+legend([hF, hB], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
 
 figPath = fullfile(outDir, 'two_state_absorption.png');
 try
@@ -782,39 +782,45 @@ fprintf('状态 2 腔深 (mm)，正向窄带、反向宽带\n');
 disp(reshape(hBest2, 2, 4).' * 1e3);
 
 fig = figure('Color', 'w', 'Position', [80, 40, 980, 760]);
+if exist('OCTAVE_VERSION', 'builtin')
+    set(fig, 'defaultaxesfontname', 'WenQuanYi Micro Hei');
+    set(fig, 'defaulttextfontname', 'WenQuanYi Micro Hei');
+end
 subplot(2, 1, 1);
-plot(fPlot, af1, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(fPlot, ab1, 'r--', 'LineWidth', 1.7);
-plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
 patch([fLo1, fHi1, fHi1, fLo1], [0, 0, 1, 1], [0.75, 0.85, 1], ...
-    'FaceAlpha', 0.25, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-children = get(gca, 'Children');
-set(gca, 'Children', [children(2:end); children(1)]);
+    'FaceAlpha', 0.18, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+hF1 = plot(fPlot, af1, 'b-', 'LineWidth', 1.8);
+hB1 = plot(fPlot, ab1, 'r--', 'LineWidth', 1.8);
+hL1 = plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+markPeak(fPlot, af1, '正向', 'b');
+markPeak(fPlot, ab1, '反向', 'r');
 grid on;
 box on;
 xlim([fPlot(1), fPlot(end)]);
+ylim([0, 1.05]);
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
-title('State 1: forward broadband, backward narrowband');
-legend('Forward', 'Backward', '0.5 level', 'Location', 'northeast');
+title('状态1：蓝实线=正向吸声（宽带），红虚线=反向吸声（窄带）');
+legend([hF1, hB1, hL1], {'正向吸声', '反向吸声', '0.5'}, 'Location', 'northeast');
 
 subplot(2, 1, 2);
-plot(fPlot, af2, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(fPlot, ab2, 'r--', 'LineWidth', 1.7);
-plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
 patch([fLo2, fHi2, fHi2, fLo2], [0, 0, 1, 1], [1, 0.85, 0.75], ...
-    'FaceAlpha', 0.25, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-children = get(gca, 'Children');
-set(gca, 'Children', [children(2:end); children(1)]);
+    'FaceAlpha', 0.18, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+hF2 = plot(fPlot, af2, 'b-', 'LineWidth', 1.8);
+hB2 = plot(fPlot, ab2, 'r--', 'LineWidth', 1.8);
+hL2 = plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+markPeak(fPlot, af2, '正向', 'b');
+markPeak(fPlot, ab2, '反向', 'r');
 grid on;
 box on;
 xlim([fPlot(1), fPlot(end)]);
+ylim([0, 1.05]);
 xlabel('Frequency (Hz)');
 ylabel('Absorption');
-title('State 2: forward narrowband, backward broadband');
-legend('Forward', 'Backward', '0.5 level', 'Location', 'northeast');
+title('状态2：蓝实线=正向吸声（窄带），红虚线=反向吸声（宽带）');
+legend([hF2, hB2, hL2], {'正向吸声', '反向吸声', '0.5'}, 'Location', 'northeast');
 
 figPath = fullfile(outDir, 'two_state_bandwidth.png');
 resultPath = fullfile(outDir, 'two_state_bandwidth.mat');
@@ -966,31 +972,37 @@ end
 function plotState(f, af, ab, extra, name)
 figure('Color', 'w', 'Position', [150, 60, 1050, 900]);
 subplot(2, 1, 1);
-plot(f, af, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(f, extra.Rf, 'r--', 'LineWidth', 1.7);
-plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 markBand();
+hA = plot(f, af, 'b-', 'LineWidth', 1.7);
+hR = plot(f, extra.Rf, 'r--', 'LineWidth', 1.7);
+hT = plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 xlim([f(1), f(end)]);
-title(['(a) Forward incidence  ' name]);
+title(['正向入射  ' name]);
 ylabel('Coefficient');
-legend('Absorption', 'Reflection', 'Transmission', 'Location', 'best');
+legend([hA, hR, hT], {'吸声', '反射', '透射'}, 'Location', 'northeast');
 grid on;
 box on;
 
 subplot(2, 1, 2);
-plot(f, ab, 'b-', 'LineWidth', 1.7);
 hold on;
-plot(f, extra.Rb, 'r--', 'LineWidth', 1.7);
-plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 markBand();
+hA = plot(f, ab, 'b-', 'LineWidth', 1.7);
+hR = plot(f, extra.Rb, 'r--', 'LineWidth', 1.7);
+hT = plot(f, extra.Tr, 'k:', 'LineWidth', 1.7);
 xlim([f(1), f(end)]);
-title(['(b) Backward incidence  ' name]);
+title(['反向入射  ' name]);
 xlabel('Frequency (Hz)');
 ylabel('Coefficient');
-legend('Absorption', 'Reflection', 'Transmission', 'Location', 'best');
+legend([hA, hR, hT], {'吸声', '反射', '透射'}, 'Location', 'northeast');
 grid on;
 box on;
+end
+
+function markPeak(f, a, label, color)
+[pk, ix] = max(a);
+text(f(ix), min(pk + 0.04, 1.02), label, 'Color', color, ...
+    'HorizontalAlignment', 'center', 'FontSize', 11);
 end
 
 function markBand()
