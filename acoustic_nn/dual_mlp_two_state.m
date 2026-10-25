@@ -742,10 +742,44 @@ else
     xPrev = xInit;
 end
 
-fprintf('\n===== 正向网络搜索：状态1 正向宽带/反向窄带，状态2 对调 =====\n');
-[xBest, bestLoss] = shapeSearch(forwardNet, xInit, xPrev, lower, upper, ...
-    xMean, xStd, fTrain, 80, 50);
-fprintf('宽带/窄带适应度 %.6f\n', bestLoss);
+fprintf('\n===== 正向网络给出候选，传递矩阵挑选 =====\n');
+[kPlot, zPlot] = ductWave(fPlot, air, geom.W, geom.L, geom.stinsonN);
+modelPlot = geom;
+modelPlot.kEff = kPlot;
+modelPlot.zEff = zPlot;
+modelPlot.air = air;
+nRestart = 8;
+bestLoss = inf;
+xBest = xInit;
+af1 = [];
+ab1 = [];
+af2 = [];
+ab2 = [];
+extra1 = struct();
+extra2 = struct();
+for iRestart = 1:nRestart
+    rng(1000 + iRestart);
+    [xTry, netLoss] = shapeSearch(forwardNet, xInit, xPrev, lower, upper, ...
+        xMean, xStd, fTrain, 60, 30);
+    dTry = xTry(1:12);
+    hTry1 = xTry(13:20);
+    hTry2 = xTry(21:28);
+    [afTry1, abTry1, exTry1] = acousticResponse(dTry, hTry1, fPlot, modelPlot);
+    [afTry2, abTry2, exTry2] = acousticResponse(dTry, hTry2, fPlot, modelPlot);
+    physLoss = curveLoss(fPlot, afTry1, abTry1, afTry2, abTry2);
+    fprintf('第 %d 组  网络适应度 %.4f  传递矩阵适应度 %.4f\n', iRestart, netLoss, physLoss);
+    if physLoss < bestLoss
+        bestLoss = physLoss;
+        xBest = xTry;
+        af1 = afTry1;
+        ab1 = abTry1;
+        af2 = afTry2;
+        ab2 = abTry2;
+        extra1 = exTry1;
+        extra2 = exTry2;
+    end
+end
+fprintf('传递矩阵最优适应度 %.6f\n', bestLoss);
 
 dBest = xBest(1:12);
 hBest1 = xBest(13:20);
@@ -756,14 +790,7 @@ nf = numel(fTrain);
 reportShape('网络 状态1', fTrain, y1(1:nf), y1(nf + 1:end), true);
 reportShape('网络 状态2', fTrain, y2(1:nf), y2(nf + 1:end), false);
 
-fprintf('用传递矩阵重算 100:1:700 Hz...\n');
-[kPlot, zPlot] = ductWave(fPlot, air, geom.W, geom.L, geom.stinsonN);
-modelPlot = geom;
-modelPlot.kEff = kPlot;
-modelPlot.zEff = zPlot;
-modelPlot.air = air;
-[af1, ab1, extra1] = acousticResponse(dBest, hBest1, fPlot, modelPlot);
-[af2, ab2, extra2] = acousticResponse(dBest, hBest2, fPlot, modelPlot);
+fprintf('用传递矩阵在 100:1:700 Hz 上的曲线：\n');
 reportShape('传递矩阵 状态1', fPlot, af1, ab1, true);
 reportShape('传递矩阵 状态2', fPlot, af2, ab2, false);
 [~, ~, fLo1, fHi1] = bestWindow(fPlot, af1, ab1);
@@ -878,6 +905,13 @@ for gen = 1:generations
     end
     pop = nextPop(1:population, :);
 end
+end
+
+function loss = curveLoss(f, af1, ab1, af2, ab2)
+[loss1, fNarrow1] = shapeGap(f, af1, ab1, true);
+[loss2, fNarrow2] = shapeGap(f, af2, ab2, false);
+shift = abs(fNarrow1 - fNarrow2);
+loss = loss1 + loss2 + (max(0, 100 - shift) / 100) ^ 2;
 end
 
 function loss = shapeFitness(forwardNet, x, xMean, xStd, f)
