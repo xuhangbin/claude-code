@@ -15,7 +15,7 @@
 %
 % 和论文的差别只来自你的目标，论文正文没有这条任务：
 %   论文是 12 个参数对应一条 100 点吸声谱。
-%   这里是 20 个参数对应正向、反向各 100 点，拼成 200 维。
+%   这里是 20 个参数对应正向、反向各一条谱，频率从 100 Hz 到 700 Hz。
 %   论文没有给出学习率和遗传算法的种群、代数、适应度，脚本里写明了取值。
 %
 % 设计结果是同一组孔径下的两套腔深。比较的是 300–500 Hz 的平均吸声系数：
@@ -60,7 +60,7 @@ physicsChunk = 64;
 
 %% 频率、空气和名义几何
 
-fTrain = linspace(100, 500, 100);
+fTrain = linspace(100, 700, 121);
 fPlot = 100:1:700;
 
 air = struct();
@@ -109,6 +109,15 @@ if physicsOnly
     return;
 end
 
+if strcmp(getenv('RUN_MODE'), 'bandwidth')
+    outDir = fileparts(mfilename('fullpath'));
+    if isempty(outDir)
+        outDir = pwd;
+    end
+    runBandwidthSwap(outDir, air, geom, fPlot, dLower, dUpper, hLower, hUpper);
+    return;
+end
+
 checkNetworkGradient();
 
 %% 用传递矩阵生成数据集
@@ -151,7 +160,8 @@ YTestS = (YTest - yMean) ./ yStd;
 %% 第一阶段：训练正向网络并冻住
 
 fprintf('\n===== 训练正向网络：20 个参数 -> 正向/反向吸声谱 =====\n');
-forwardNet = initMLP([20, 64, 128, 128, 200], {'relu', 'relu', 'relu', 'linear'});
+nSpec = 2 * numel(fTrain);
+forwardNet = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
 forwardNet = trainRegressor(forwardNet, XTrainS, YTrain, XValS, YVal, ...
     maxEpochs, batchSize, learnRate);
 
@@ -164,7 +174,7 @@ fprintf('测试集 MAE  正向吸声 %.4f  反向吸声 %.4f\n', ...
 %% 第二阶段：冻住正向网络，训练逆向自编码器
 
 fprintf('\n===== 训练逆向网络：吸声谱 -> 20 个参数 =====\n');
-inverseNet = initMLP([200, 256, 256, 128, 20], {'relu', 'relu', 'relu', 'linear'});
+inverseNet = initMLP([nSpec, 256, 256, 128, 20], {'relu', 'relu', 'relu', 'linear'});
 inverseNet = trainAutoencoder(inverseNet, forwardNet, YTrainS, YTrain, ...
     YValS, YVal, maxEpochs, batchSize, learnRate);
 
@@ -697,6 +707,217 @@ end
 function y = predictState(forwardNet, d, h, xMean, xStd)
 x = ([d, h] - xMean) ./ xStd;
 y = mlpPredict(forwardNet, x);
+end
+
+function runBandwidthSwap(outDir, air, geom, fPlot, dLower, dUpper, hLower, hUpper)
+trainedPath = fullfile(outDir, 'two_state_design.mat');
+if exist(trainedPath, 'file') ~= 2
+    error('找不到已训练的正向网络：%s', trainedPath);
+end
+trained = load(trainedPath);
+forwardNet = trained.forwardNet;
+xMean = trained.xMean;
+xStd = trained.xStd;
+fTrain = trained.fTrain(:)';
+fprintf('载入已训练正向网络，在 %.0f–%.0f Hz 的网络谱上搜索宽带/窄带对调。\n', ...
+    fTrain(1), fTrain(end));
+
+broadTarget = shapeTarget(fTrain, 'broad', 'narrow');
+narrowTarget = shapeTarget(fTrain, 'narrow', 'broad');
+paramBroad = unstandardizeParameters( ...
+    mlpPredict(trained.inverseNet, standardizeRows(broadTarget, trained.yMean, trained.yStd)), ...
+    xMean, xStd);
+paramNarrow = unstandardizeParameters( ...
+    mlpPredict(trained.inverseNet, standardizeRows(narrowTarget, trained.yMean, trained.yStd)), ...
+    xMean, xStd);
+dInit = 0.5 * (paramBroad(1:12) + paramNarrow(1:12));
+xInit = [dInit, paramBroad(13:20), paramNarrow(13:20)];
+lower = [dLower, hLower, hLower];
+upper = [dUpper, hUpper, hUpper];
+xInit = min(max(xInit, lower), upper);
+if isfield(trained, 'dBest')
+    xPrev = [trained.dBest(:)', trained.hBest1(:)', trained.hBest2(:)'];
+    xPrev = min(max(xPrev, lower), upper);
+else
+    xPrev = xInit;
+end
+
+fprintf('\n===== 正向网络搜索：状态1 正向宽带/反向窄带，状态2 对调 =====\n');
+[xBest, bestLoss] = shapeSearch(forwardNet, xInit, xPrev, lower, upper, ...
+    xMean, xStd, fTrain, 80, 50);
+fprintf('宽带/窄带适应度 %.6f\n', bestLoss);
+
+dBest = xBest(1:12);
+hBest1 = xBest(13:20);
+hBest2 = xBest(21:28);
+y1 = predictState(forwardNet, dBest, hBest1, xMean, xStd);
+y2 = predictState(forwardNet, dBest, hBest2, xMean, xStd);
+nf = numel(fTrain);
+reportShape('网络 状态1', fTrain, y1(1:nf), y1(nf + 1:end));
+reportShape('网络 状态2', fTrain, y2(1:nf), y2(nf + 1:end));
+
+fprintf('用传递矩阵重算 100:1:700 Hz...\n');
+[kPlot, zPlot] = ductWave(fPlot, air, geom.W, geom.L, geom.stinsonN);
+modelPlot = geom;
+modelPlot.kEff = kPlot;
+modelPlot.zEff = zPlot;
+modelPlot.air = air;
+[af1, ab1, extra1] = acousticResponse(dBest, hBest1, fPlot, modelPlot);
+[af2, ab2, extra2] = acousticResponse(dBest, hBest2, fPlot, modelPlot);
+reportShape('传递矩阵 状态1', fPlot, af1, ab1);
+reportShape('传递矩阵 状态2', fPlot, af2, ab2);
+fprintf('传递矩阵 det 误差：状态1 %.3e，状态2 %.3e\n', extra1.detErr, extra2.detErr);
+
+fprintf('\n共用孔径 (mm)\n');
+disp(reshape(dBest, 3, 4).' * 1e3);
+fprintf('状态 1 腔深 (mm)，正向宽带、反向窄带\n');
+disp(reshape(hBest1, 2, 4).' * 1e3);
+fprintf('状态 2 腔深 (mm)，正向窄带、反向宽带\n');
+disp(reshape(hBest2, 2, 4).' * 1e3);
+
+fig = figure('Color', 'w', 'Position', [80, 40, 980, 760]);
+subplot(2, 1, 1);
+plot(fPlot, af1, 'b-', 'LineWidth', 1.7);
+hold on;
+plot(fPlot, ab1, 'r--', 'LineWidth', 1.7);
+plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+grid on;
+box on;
+xlim([fPlot(1), fPlot(end)]);
+xlabel('Frequency (Hz)');
+ylabel('Absorption');
+title('State 1: forward broadband, backward narrowband');
+legend('Forward', 'Backward', '0.5 level', 'Location', 'northeast');
+
+subplot(2, 1, 2);
+plot(fPlot, af2, 'b-', 'LineWidth', 1.7);
+hold on;
+plot(fPlot, ab2, 'r--', 'LineWidth', 1.7);
+plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+grid on;
+box on;
+xlim([fPlot(1), fPlot(end)]);
+xlabel('Frequency (Hz)');
+ylabel('Absorption');
+title('State 2: forward narrowband, backward broadband');
+legend('Forward', 'Backward', '0.5 level', 'Location', 'northeast');
+
+figPath = fullfile(outDir, 'two_state_bandwidth.png');
+resultPath = fullfile(outDir, 'two_state_bandwidth.mat');
+save(resultPath, 'fPlot', 'fTrain', 'dBest', 'hBest1', 'hBest2', ...
+    'af1', 'ab1', 'af2', 'ab2', 'extra1', 'extra2', 'bestLoss');
+print(fig, figPath, '-dpng', '-r140');
+fprintf('图已保存到 %s\n', figPath);
+fprintf('参数已保存到 %s\n', resultPath);
+end
+
+function s = shapeTarget(f, forwardKind, backwardKind)
+s = [shapeCurve(f, forwardKind), shapeCurve(f, backwardKind)];
+end
+
+function a = shapeCurve(f, kind)
+if strcmp(kind, 'broad')
+    a = 0.72 * double(f >= 160 & f <= 460);
+else
+    a = 0.92 * exp(-0.5 * ((f - 340) / 16) .^ 2);
+end
+end
+
+function [bestX, bestLoss] = shapeSearch(forwardNet, xInit, xPrev, lower, upper, ...
+    xMean, xStd, fTrain, population, generations)
+nVar = numel(xInit);
+pop = lower + (upper - lower) .* rand(population, nVar);
+pop(1, :) = xInit;
+pop(2, :) = xPrev;
+bestX = xInit;
+bestLoss = inf;
+for gen = 1:generations
+    loss = zeros(population, 1);
+    for i = 1:population
+        loss(i) = shapeFitness(forwardNet, pop(i, :), xMean, xStd, fTrain);
+    end
+    [loss, order] = sort(loss);
+    pop = pop(order, :);
+    if loss(1) < bestLoss
+        bestLoss = loss(1);
+        bestX = pop(1, :);
+    end
+    fprintf('宽带搜索 第 %02d 代  当前最优 %.6f\n', gen, bestLoss);
+    nextPop = pop(1:min(2, population), :);
+    while size(nextPop, 1) < population
+        parentPool = max(2, ceil(population / 3));
+        p1 = pop(randi(parentPool), :);
+        p2 = pop(randi(parentPool), :);
+        mix = rand;
+        child = mix * p1 + (1 - mix) * p2;
+        span = upper - lower;
+        mutate = rand(1, nVar) < 0.25;
+        child(mutate) = child(mutate) + 0.10 * span(mutate) .* randn(1, sum(mutate));
+        child = min(max(child, lower), upper);
+        nextPop = [nextPop; child]; %#ok<AGROW>
+    end
+    pop = nextPop(1:population, :);
+end
+end
+
+function loss = shapeFitness(forwardNet, x, xMean, xStd, f)
+d = x(1:12);
+y1 = predictState(forwardNet, d, x(13:20), xMean, xStd);
+y2 = predictState(forwardNet, d, x(21:28), xMean, xStd);
+nf = numel(f);
+loss = shapeGap(f, y1(1:nf), y1(nf + 1:end), true) ...
+    + shapeGap(f, y2(1:nf), y2(nf + 1:end), false);
+end
+
+function loss = shapeGap(f, af, ab, forwardIsBroad)
+[wideF, peakF] = absorptionWidth(f, af);
+[wideB, peakB] = absorptionWidth(f, ab);
+if forwardIsBroad
+    wideBroad = wideF;
+    wideNarrow = wideB;
+    peakNarrow = peakB;
+    peakBroad = peakF;
+else
+    wideBroad = wideB;
+    wideNarrow = wideF;
+    peakNarrow = peakF;
+    peakBroad = peakB;
+end
+broadGoal = 180;
+narrowGoal = 40;
+loss = (max(0, broadGoal - wideBroad) / broadGoal) ^ 2 ...
+    + (max(0, wideNarrow - narrowGoal) / narrowGoal) ^ 2 ...
+    + max(0, 0.75 - peakNarrow) ^ 2 ...
+    + max(0, 0.60 - peakBroad) ^ 2 ...
+    + (max(0, 3 * wideNarrow - wideBroad) / broadGoal) ^ 2;
+end
+
+function [widthHz, peak] = absorptionWidth(f, a)
+df = mean(diff(f));
+above = a >= 0.5;
+best = 0;
+run = 0;
+for i = 1:numel(above)
+    if above(i)
+        run = run + 1;
+        if run > best
+            best = run;
+        end
+    else
+        run = 0;
+    end
+end
+widthHz = best * df;
+peak = max(a);
+end
+
+function reportShape(name, f, af, ab)
+[wideF, peakF] = absorptionWidth(f, af);
+[wideB, peakB] = absorptionWidth(f, ab);
+[~, iF] = max(af);
+[~, iB] = max(ab);
+fprintf('%s：正向带宽 %.0f Hz（峰 %.2f @ %.0f Hz），反向带宽 %.0f Hz（峰 %.2f @ %.0f Hz）\n', ...
+    name, wideF, peakF, f(iF), wideB, peakB, f(iB));
 end
 
 function plotState(f, af, ab, extra, name)
