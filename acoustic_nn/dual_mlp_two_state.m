@@ -753,8 +753,8 @@ hBest2 = xBest(21:28);
 y1 = predictState(forwardNet, dBest, hBest1, xMean, xStd);
 y2 = predictState(forwardNet, dBest, hBest2, xMean, xStd);
 nf = numel(fTrain);
-reportShape('网络 状态1', fTrain, y1(1:nf), y1(nf + 1:end));
-reportShape('网络 状态2', fTrain, y2(1:nf), y2(nf + 1:end));
+reportShape('网络 状态1', fTrain, y1(1:nf), y1(nf + 1:end), true);
+reportShape('网络 状态2', fTrain, y2(1:nf), y2(nf + 1:end), false);
 
 fprintf('用传递矩阵重算 100:1:700 Hz...\n');
 [kPlot, zPlot] = ductWave(fPlot, air, geom.W, geom.L, geom.stinsonN);
@@ -764,8 +764,14 @@ modelPlot.zEff = zPlot;
 modelPlot.air = air;
 [af1, ab1, extra1] = acousticResponse(dBest, hBest1, fPlot, modelPlot);
 [af2, ab2, extra2] = acousticResponse(dBest, hBest2, fPlot, modelPlot);
-reportShape('传递矩阵 状态1', fPlot, af1, ab1);
-reportShape('传递矩阵 状态2', fPlot, af2, ab2);
+reportShape('传递矩阵 状态1', fPlot, af1, ab1, true);
+reportShape('传递矩阵 状态2', fPlot, af2, ab2, false);
+[~, ~, fLo1, fHi1] = bestWindow(fPlot, af1, ab1);
+[~, ~, fLo2, fHi2] = bestWindow(fPlot, ab2, af2);
+[~, ~, fNarrow1] = absorptionWidth(fPlot, ab1);
+[~, ~, fNarrow2] = absorptionWidth(fPlot, af2);
+fprintf('窄带峰从 %.0f Hz 移到 %.0f Hz，移动 %.0f Hz。\n', ...
+    fNarrow1, fNarrow2, abs(fNarrow2 - fNarrow1));
 fprintf('传递矩阵 det 误差：状态1 %.3e，状态2 %.3e\n', extra1.detErr, extra2.detErr);
 
 fprintf('\n共用孔径 (mm)\n');
@@ -781,6 +787,10 @@ plot(fPlot, af1, 'b-', 'LineWidth', 1.7);
 hold on;
 plot(fPlot, ab1, 'r--', 'LineWidth', 1.7);
 plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+patch([fLo1, fHi1, fHi1, fLo1], [0, 0, 1, 1], [0.75, 0.85, 1], ...
+    'FaceAlpha', 0.25, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+children = get(gca, 'Children');
+set(gca, 'Children', [children(2:end); children(1)]);
 grid on;
 box on;
 xlim([fPlot(1), fPlot(end)]);
@@ -794,6 +804,10 @@ plot(fPlot, af2, 'b-', 'LineWidth', 1.7);
 hold on;
 plot(fPlot, ab2, 'r--', 'LineWidth', 1.7);
 plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
+patch([fLo2, fHi2, fHi2, fLo2], [0, 0, 1, 1], [1, 0.85, 0.75], ...
+    'FaceAlpha', 0.25, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+children = get(gca, 'Children');
+set(gca, 'Children', [children(2:end); children(1)]);
 grid on;
 box on;
 xlim([fPlot(1), fPlot(end)]);
@@ -865,34 +879,51 @@ d = x(1:12);
 y1 = predictState(forwardNet, d, x(13:20), xMean, xStd);
 y2 = predictState(forwardNet, d, x(21:28), xMean, xStd);
 nf = numel(f);
-loss = shapeGap(f, y1(1:nf), y1(nf + 1:end), true) ...
-    + shapeGap(f, y2(1:nf), y2(nf + 1:end), false);
+[loss1, fNarrow1] = shapeGap(f, y1(1:nf), y1(nf + 1:end), true);
+[loss2, fNarrow2] = shapeGap(f, y2(1:nf), y2(nf + 1:end), false);
+shift = abs(fNarrow1 - fNarrow2);
+loss = loss1 + loss2 + (max(0, 100 - shift) / 100) ^ 2;
 end
 
-function loss = shapeGap(f, af, ab, forwardIsBroad)
-[wideF, peakF] = absorptionWidth(f, af);
-[wideB, peakB] = absorptionWidth(f, ab);
+function [loss, fNarrow] = shapeGap(f, af, ab, forwardIsBroad)
 if forwardIsBroad
-    wideBroad = wideF;
-    wideNarrow = wideB;
-    peakNarrow = peakB;
-    peakBroad = peakF;
+    aBroad = af;
+    aNarrow = ab;
 else
-    wideBroad = wideB;
-    wideNarrow = wideF;
-    peakNarrow = peakF;
-    peakBroad = peakB;
+    aBroad = ab;
+    aNarrow = af;
 end
-broadGoal = 180;
-narrowGoal = 40;
-loss = (max(0, broadGoal - wideBroad) / broadGoal) ^ 2 ...
-    + (max(0, wideNarrow - narrowGoal) / narrowGoal) ^ 2 ...
-    + max(0, 0.75 - peakNarrow) ^ 2 ...
-    + max(0, 0.60 - peakBroad) ^ 2 ...
-    + (max(0, 3 * wideNarrow - wideBroad) / broadGoal) ^ 2;
+[meanBroad, meanOther] = bestWindow(f, aBroad, aNarrow);
+[widthNarrow, peakNarrow, fNarrow] = absorptionWidth(f, aNarrow);
+loss = max(0, 0.20 - (meanBroad - meanOther)) ^ 2 ...
+    + max(0, 0.45 - meanBroad) ^ 2 ...
+    + (max(0, widthNarrow - 80) / 80) ^ 2 ...
+    + max(0, 0.80 - peakNarrow) ^ 2;
 end
 
-function [widthHz, peak] = absorptionWidth(f, a)
+function [meanBroad, meanOther, fLo, fHi] = bestWindow(f, aBroad, aOther)
+df = mean(diff(f));
+nWin = max(2, round(200 / df));
+nWin = min(nWin, numel(f));
+best = -inf;
+meanBroad = 0;
+meanOther = 0;
+iBest = 1;
+for i = 1:(numel(f) - nWin + 1)
+    mb = mean(aBroad(i:i + nWin - 1));
+    mo = mean(aOther(i:i + nWin - 1));
+    if mb - mo > best
+        best = mb - mo;
+        meanBroad = mb;
+        meanOther = mo;
+        iBest = i;
+    end
+end
+fLo = f(iBest);
+fHi = f(iBest + nWin - 1);
+end
+
+function [widthHz, peak, fPeak] = absorptionWidth(f, a)
 df = mean(diff(f));
 above = a >= 0.5;
 best = 0;
@@ -908,16 +939,28 @@ for i = 1:numel(above)
     end
 end
 widthHz = best * df;
-peak = max(a);
+[peak, iPeak] = max(a);
+fPeak = f(iPeak);
 end
 
-function reportShape(name, f, af, ab)
-[wideF, peakF] = absorptionWidth(f, af);
-[wideB, peakB] = absorptionWidth(f, ab);
-[~, iF] = max(af);
-[~, iB] = max(ab);
-fprintf('%s：正向带宽 %.0f Hz（峰 %.2f @ %.0f Hz），反向带宽 %.0f Hz（峰 %.2f @ %.0f Hz）\n', ...
-    name, wideF, peakF, f(iF), wideB, peakB, f(iB));
+function reportShape(name, f, af, ab, forwardIsBroad)
+if forwardIsBroad
+    aBroad = af;
+    aNarrow = ab;
+    broadName = '正向';
+    narrowName = '反向';
+else
+    aBroad = ab;
+    aNarrow = af;
+    broadName = '反向';
+    narrowName = '正向';
+end
+[meanBroad, meanOther, fLo, fHi] = bestWindow(f, aBroad, aNarrow);
+[widthNarrow, peakNarrow, fNarrow] = absorptionWidth(f, aNarrow);
+fprintf(['%s：%s 在 %.0f–%.0f Hz 平均 %.3f，比另一方向高 %.3f；' ...
+    '%s 峰 %.2f @ %.0f Hz，连续超过 0.5 的宽度 %.0f Hz\n'], ...
+    name, broadName, fLo, fHi, meanBroad, meanBroad - meanOther, ...
+    narrowName, peakNarrow, fNarrow, widthNarrow);
 end
 
 function plotState(f, af, ab, extra, name)
