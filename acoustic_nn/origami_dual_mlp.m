@@ -11,10 +11,10 @@
 % 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3，损失是加权 MSE。
 %
 % 两种状态共用 12 个孔径。状态 2 只改 8 个实际腔高。
-% 考核频带固定为 250–450 Hz：
+% 考核频带固定为 300–500 Hz：
 %   状态 1：正向平均吸声 − 反向平均吸声 > 0.4
 %   状态 2：反向平均吸声 − 正向平均吸声 > 0.4
-% 网络在训练频率上搜索，候选再用 250:1:450 Hz 的传递矩阵打分并局部修正。
+% 网络在训练频率上搜索，候选再用 300:1:500 Hz 的传递矩阵打分并局部修正。
 % 图和曲线用 100:1:700 Hz。
 %
 % 直接运行本文件。不需要 Deep Learning Toolbox。
@@ -40,8 +40,8 @@ rng(7);
 mode = getenv('RUN_MODE');
 const = makeConst();
 fTrain = linspace(100, 700, 121);
-fBand = 250:2:450;
-fScore = 250:1:450;
+fBand = 300:2:500;
+fScore = 300:1:500;
 fPlot = 100:1:700;
 
 modelTrain = prepareModel(fTrain, const);
@@ -166,7 +166,7 @@ final.H2mm = H2mm;
 final.Heq1mm = equivalentHeight(reshapeMm(H1mm, 2)) * 1e3;
 final.Heq2mm = equivalentHeight(reshapeMm(H2mm, 2)) * 1e3;
 
-fprintf('\n========== 传递矩阵最终结果（250–450 Hz）==========\n');
+fprintf('\n========== 传递矩阵最终结果（300–500 Hz）==========\n');
 printDesign(final, '最终');
 fprintf('能量误差  状态1 %.3e  状态2 %.3e\n', energy1, energy2);
 
@@ -588,12 +588,12 @@ end
 
 function [X, Y] = buildDataset(nBase, nPert, maxHot, f, model, const)
 [X, Y] = sampleUniform(nBase, f, model, const);
-band = f >= 250 & f <= 450;
+band = f >= 300 & f <= 500;
 nf = numel(f);
 af = Y(:, 1:nf);
 ab = Y(:, nf + 1:end);
 gap = mean(af(:, band), 2) - mean(ab(:, band), 2);
-fprintf('均匀样本在 250–450 Hz 的方向差范围 %.3f 到 %.3f\n', min(gap), max(gap));
+fprintf('均匀样本在 300–500 Hz 的方向差范围 %.3f 到 %.3f\n', min(gap), max(gap));
 [~, order] = sort(abs(gap), 'descend');
 nHot = min(maxHot, numel(order));
 hot = order(1:nHot);
@@ -718,7 +718,7 @@ end
 
 function w = spectrumWeight(f)
 nf = numel(f);
-band = double(f >= 250 & f <= 450);
+band = double(f >= 300 & f <= 500);
 wb = 1 + 3 * band;
 w = [wb, wb];
 w = w / mean(w);
@@ -852,7 +852,7 @@ end
 function [maeF, maeB, maeBand] = reportMae(net, X, Y, f, name)
 pred = mlpPredict(net, X);
 nf = numel(f);
-band = f >= 250 & f <= 450;
+band = f >= 300 & f <= 500;
 afP = pred(:, 1:nf);
 abP = pred(:, nf + 1:end);
 afY = Y(:, 1:nf);
@@ -861,7 +861,7 @@ maeF = mean(abs(afP(:) - afY(:)));
 maeB = mean(abs(abP(:) - abY(:)));
 bandErr = [afP(:, band) - afY(:, band), abP(:, band) - abY(:, band)];
 maeBand = mean(abs(bandErr(:)));
-fprintf('%s MAE  正向 %.4f  反向 %.4f  250–450 Hz %.4f\n', name, maeF, maeB, maeBand);
+fprintf('%s MAE  正向 %.4f  反向 %.4f  300–500 Hz %.4f\n', name, maeF, maeB, maeBand);
 end
 
 function [af, ab] = predictAbs(net, xMean, xStd, Xmm)
@@ -874,7 +874,7 @@ end
 
 function [seeds, X, Y] = pairedSeeds(model, const, nD, nH)
 f = model.f;
-band = f >= 250 & f <= 450;
+band = f >= 300 & f <= 500;
 d = const.dMin + (const.dMax - const.dMin) * rand(nD, 12);
 dRep = zeros(nD * nH, 12);
 hAll = const.Hmin + (const.Hmax - const.Hmin) * rand(nD * nH, 8);
@@ -1174,7 +1174,7 @@ loss = info.loss;
 end
 
 function info = gapInfo(f, af1, ab1, af2, ab2)
-band = f >= 250 & f <= 450;
+band = f >= 300 & f <= 500;
 mf1 = mean(af1(:, band), 2);
 mb1 = mean(ab1(:, band), 2);
 mf2 = mean(af2(:, band), 2);
@@ -1274,14 +1274,14 @@ end
 
 function drawState(f, af, ab, mf, mb, gapValue, ~, forwardLeads)
 hold on;
-patch([250, 450, 450, 250], [0, 0, 1, 1], [1, 0.92, 0.55], ...
+patch([300, 500, 500, 300], [0, 0, 1, 1], [1, 0.92, 0.55], ...
     'EdgeColor', 'none', 'FaceAlpha', 0.45, 'HandleVisibility', 'off');
 hF = plot(f, af, 'b-', 'LineWidth', 1.8);
 hB = plot(f, ab, 'r--', 'LineWidth', 1.8);
 if forwardLeads
-    name = sprintf('状态1：250–450 Hz 正向 %.3f，反向 %.3f，正向高出 %.3f', mf, mb, gapValue);
+    name = sprintf('状态1：300–500 Hz 正向 %.3f，反向 %.3f，正向高出 %.3f', mf, mb, gapValue);
 else
-    name = sprintf('状态2：250–450 Hz 正向 %.3f，反向 %.3f，反向高出 %.3f', mf, mb, gapValue);
+    name = sprintf('状态2：300–500 Hz 正向 %.3f，反向 %.3f，反向高出 %.3f', mf, mb, gapValue);
 end
 grid on;
 box on;
