@@ -20,6 +20,7 @@
 % 直接运行本文件。不需要 Deep Learning Toolbox。
 % 短流程：setenv('RUN_MODE','quick'); origami_dual_mlp
 % 只做物理核对：setenv('RUN_MODE','verify'); origami_dual_mlp
+% 只训练正向网络并画精度图：运行 origami_nn_accuracy
 
 function origami_dual_mlp
 
