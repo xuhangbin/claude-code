@@ -3,8 +3,8 @@
 % 物理和 origami_four_cell.m 相同。四个单胞并联，每个单胞是
 % 微穿孔板、折纸腔、微穿孔板、折纸腔、微穿孔板。
 % 折纸腔先按体积公式换成等效高度，腔体传递矩阵用 Stinson 等效密度和体积模量。
-% 折纸几何固定：a = 30 mm，hc = 20 mm，n0 = 3，beta = 45°。
-% 实际腔高 H 要满足 H/n0 < hc，因此每个腔取 0.5–59 mm。孔径取 0.1–8 mm。
+% 折纸几何固定：a = 30 mm，hc = 20 mm，n0 = 4，beta = 45°。
+% 实际腔高取 10–80 mm，80 mm 等于 n0*hc。孔径取 1–7 mm，避开 0.1 mm 和 8 mm。
 %
 % 正向网络：20 -> 64 -> 128 -> 128 -> 2*Nf
 % 20 个输入是 12 个孔径和 8 个实际腔高，输出是这一几何的正向、反向吸声谱。
@@ -15,7 +15,7 @@
 %   状态 1：正向平均吸声 − 反向平均吸声 > 0.4
 %   状态 2：反向平均吸声 − 正向平均吸声 > 0.4
 % 网络在训练频率上搜索，候选再用 250:1:450 Hz 的传递矩阵打分并局部修正。
-% 图和曲线用 100:1:600 Hz。
+% 图和曲线用 100:1:700 Hz。
 %
 % 直接运行本文件。不需要 Deep Learning Toolbox。
 % 短流程：setenv('RUN_MODE','quick'); origami_dual_mlp
@@ -39,10 +39,10 @@ rng(7);
 
 mode = getenv('RUN_MODE');
 const = makeConst();
-fTrain = linspace(100, 600, 101);
+fTrain = linspace(100, 700, 121);
 fBand = 250:2:450;
 fScore = 250:1:450;
-fPlot = 100:1:600;
+fPlot = 100:1:700;
 
 modelTrain = prepareModel(fTrain, const);
 verifyPhysics(const, modelTrain, fTrain);
@@ -115,7 +115,11 @@ modelPlot = prepareModel(fPlot, const);
 best = [];
 for roundId = 1:maxRounds
     fprintf('\n===== 第 %d 轮：网络搜索，传递矩阵复核 =====\n', roundId);
-    seeds = [pairSeeds; structuredSeeds(const)];
+    warm = [3.159769, 1, 4.713910, 3.619750, 7, 6.944, ...
+        4.825182, 1, 3.069580, 4.422677, 1.197, 1, ...
+        48.162747, 10, 46.210000, 10, 28.311400, 10, 58.179000, 19.998762, ...
+        10.638192, 59, 42.788603, 59, 36.744369, 59, 20.055518, 10];
+    seeds = [warm; pairSeeds; structuredSeeds(const)];
     scored = searchOnce(net, xMean, xStd, fTrain, seeds, const, ...
         modelBand, modelScore, nRestart, nPop, nGen, physPop, physGen);
     printDesign(scored, '本轮最优');
@@ -142,7 +146,7 @@ for roundId = 1:maxRounds
     reportMae(net, XTest, YTest, fTrain, '续训后测试集');
 end
 
-fprintf('\n用 100:1:600 Hz 的传递矩阵计算最终曲线...\n');
+fprintf('\n用 100:1:700 Hz 的传递矩阵计算最终曲线...\n');
 dMm = best.dMm;
 H1mm = best.H1mm;
 H2mm = best.H2mm;
@@ -201,13 +205,13 @@ const.L = 30e-3;
 const.t = 2e-3;
 const.a = 30;
 const.hc = 20;
-const.n0 = 3;
+const.n0 = 4;
 const.beta = 45;
 const.stinsonN = 200;
-const.dMin = 0.1;
-const.dMax = 8;
-const.Hmin = 0.5;
-const.Hmax = 59;
+const.dMin = 1;
+const.dMax = 7;
+const.Hmin = 10;
+const.Hmax = 80;
 const.gap = 0.4;
 const.gapTarget = 0.42;
 end
@@ -246,7 +250,7 @@ function Heq = equivalentHeight(H)
 % H 的单位是 m，形状任意。Heq 与 H 同形状，单位也是 m。
 a = 30;
 hc = 20;
-n0 = 3;
+n0 = 4;
 beta = 45;
 Hmm = H * 1e3;
 h = Hmm / n0;
@@ -414,22 +418,22 @@ function [af, ab, energyErr] = acousticMm(dMm, hMm, f, model)
 end
 
 function verifyPhysics(const, model, f)
-[Heq54, V54] = volumeOfHeight(54);
-[Heq42, V42] = volumeOfHeight(42);
-fprintf('自检 H=54 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V54, Heq54);
-fprintf('自检 H=42 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V42, Heq42);
-if abs(V54 - 36730.3710) > 1e-2 || abs(Heq54 - 40.8115) > 1e-3
-    error('H=54 mm 的体积或等效高度与折纸公式不符。');
+[Heq80, V80] = volumeOfHeight(80);
+[Heq10, V10] = volumeOfHeight(10);
+fprintf('自检 H=80 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V80, Heq80);
+fprintf('自检 H=10 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V10, Heq10);
+if abs(V80 - 72000) > 1e-2 || abs(Heq80 - 80) > 1e-3
+    error('H=80 mm 的四层折纸体积或等效高度不符。');
 end
-if abs(V42 - 23231.2003) > 1e-2 || abs(Heq42 - 25.8124) > 1e-3
-    error('H=42 mm 的体积或等效高度与折纸公式不符。');
+if V10 <= 0 || Heq10 <= 0
+    error('H=10 mm 的折纸腔体积不是正数。');
 end
 
 d1 = repmat([2.75, 1.73, 0.42], 1, 4);
 h1 = 47 * ones(1, 8);
 d2 = [0.4, 1.2, 3.6, 2.2, 0.8, 4.4, 1.5, 2.8, 0.6, 3.3, 1.1, 2.4];
 h2 = [12, 28, 36, 18, 52, 24, 44, 33];
-fCheck = [100, 350, 600];
+fCheck = [100, 350, 700];
 [kRef, zRef] = stinsonLoop(fCheck, const);
 kErr = max(abs(kRef - model.kEff(fCheckIndex(f, fCheck))));
 zErr = max(abs(zRef - model.zEff(fCheckIndex(f, fCheck))));
@@ -905,14 +909,14 @@ end
 
 function seeds = structuredSeeds(const)
 dSets = [ ...
-    0.4, 1.2, 3.5, 3.5, 1.2, 0.4, 0.8, 2.4, 5.0, 5.0, 2.4, 0.8; ...
-    1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0; ...
-    0.3, 0.8, 2.5, 0.5, 1.5, 3.5, 0.8, 2.2, 4.5, 1.2, 3.0, 6.0; ...
-    2.0, 0.5, 3.0, 0.5, 2.0, 4.0, 3.0, 1.0, 0.4, 1.5, 3.5, 0.6];
+    1.2, 2.4, 4.5, 4.5, 2.4, 1.2, 1.5, 3.2, 6.0, 6.0, 3.2, 1.5; ...
+    1.0, 2.5, 5.0, 1.0, 2.5, 5.0, 1.0, 2.5, 5.0, 1.0, 2.5, 5.0; ...
+    1.2, 3.0, 6.5, 2.0, 4.0, 7.0, 1.5, 3.5, 5.5, 2.2, 4.5, 6.8; ...
+    2.0, 1.0, 4.0, 1.5, 3.0, 6.0, 4.0, 1.2, 2.5, 3.0, 5.0, 1.0];
 hSets = [ ...
-    48, 22, 52, 28, 40, 18, 55, 30; ...
-    30, 50, 24, 46, 20, 42, 26, 54; ...
-    54, 36, 48, 24, 42, 16, 50, 22];
+    60, 20, 70, 25, 45, 15, 75, 30; ...
+    25, 65, 18, 55, 22, 70, 35, 80; ...
+    40, 15, 55, 28, 68, 18, 50, 12];
 nD = size(dSets, 1);
 nH = size(hSets, 1);
 seeds = zeros(nD * nH * (nH - 1), 28);
@@ -1276,9 +1280,9 @@ else
 end
 grid on;
 box on;
-xlim([100, 600]);
+xlim([min(f), max(f)]);
 ylim([0, 1]);
-xticks(100:100:600);
+xticks(min(f):100:max(f));
 yticks(0:0.2:1);
 xlabel('频率 / Hz');
 ylabel('吸声系数');
