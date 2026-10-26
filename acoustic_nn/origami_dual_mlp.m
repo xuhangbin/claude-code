@@ -6,9 +6,12 @@
 % 折纸几何固定：a = 30 mm，hc = 20 mm，n0 = 4，beta = 45°。
 % 实际腔高取 10–80 mm，80 mm 等于 n0*hc。孔径仍取 0.1–8 mm。
 %
+% 使用顺序和示意图一致：先逆向，再正向。
+% 逆向网络：2*Nf -> 256 -> 256 -> 128 -> 20
+%   一条正反向吸声曲线进去，20 个尺寸出来。
 % 正向网络：20 -> 64 -> 128 -> 128 -> 2*Nf
-% 20 个输入是 12 个孔径和 8 个实际腔高，输出是这一几何的正向、反向吸声谱。
-% 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3，损失是加权 MSE。
+%   20 个尺寸进去，正反向吸声曲线出来。正向网络先训练，然后冻住，再训练逆向网络。
+% 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3。
 %
 % 两种状态共用 12 个孔径。状态 2 只改 8 个实际腔高。
 % 考核频带固定为 300–500 Hz：
@@ -74,6 +77,7 @@ if quick
     batchSize = 64;
     nPairD = 12;
     nPairH = 4;
+    invEpoch = 1;
 else
     nSamples = 12000;
     nPert = 4;
@@ -89,6 +93,7 @@ else
     batchSize = 256;
     nPairD = 480;
     nPairH = 24;
+    invEpoch = 20;
 end
 learnRate = 1e-3;
 
@@ -111,6 +116,16 @@ net = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
     maxEpoch, minEpoch, batchSize, learnRate, yWeight, '正向网络');
 [testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
 
+yMean = mean(YTrain, 1);
+yStd = std(YTrain, 0, 1);
+yStd(yStd < 1e-12) = 1;
+fprintf('\n===== 训练逆向网络：%d -> 256 -> 256 -> 128 -> 20 =====\n', nSpec);
+fprintf('正向网络已冻住。逆向网络先给出尺寸，再送进正向网络，让还原出的曲线贴近原曲线。\n');
+inverseNet = initMLP([nSpec, 256, 256, 128, 20], {'relu', 'relu', 'relu', 'linear'});
+inverseNet = trainInverse(inverseNet, net, XTrain, YTrain, XVal, YVal, ...
+    yMean, yStd, invEpoch, batchSize, learnRate);
+reportInverse(inverseNet, net, XTest, YTest, yMean, yStd, '测试集');
+
 if accuracyOnly
     outDir = fileparts(mfilename('fullpath'));
     if isempty(outDir)
@@ -125,9 +140,14 @@ modelBand = prepareModel(fBand, const);
 modelScore = prepareModel(fScore, const);
 modelPlot = prepareModel(fPlot, const);
 
+invSeeds = inverseDesignSeeds(inverseNet, fTrain, xMean, xStd, yMean, yStd, const);
+infoInv = physicsInfo(invSeeds, fScore, modelScore);
+[~, invKey] = max(rankKey(infoInv));
+fprintf('逆向初解  状态1差 %.4f  状态2差 %.4f\n', infoInv.g1(invKey), infoInv.g2(invKey));
+
 best = [];
 for roundId = 1:maxRounds
-    fprintf('\n===== 第 %d 轮：网络搜索，传递矩阵复核 =====\n', roundId);
+    fprintf('\n===== 第 %d 轮：正向网络搜索，传递矩阵复核 =====\n', roundId);
     warm = [ ...
         4.13987519, 1.00000000, 3.83105896, 7.00000000, 6.77207171, 1.00000000, ...
         1.00000000, 7.00000000, 6.94331789, 7.00000000, 1.00000000, 7.00000000, ...
@@ -137,7 +157,7 @@ for roundId = 1:maxRounds
         4.825182, 0.10, 3.069580, 4.422677, 1.197, 0.10, ...
         48.162747, 10, 46.210000, 10, 28.311400, 10, 58.179000, 19.998762, ...
         10.638192, 59, 42.788603, 59, 36.744369, 59, 20.055518, 10];
-    seeds = [warm; pairSeeds; structuredSeeds(const)];
+    seeds = [invSeeds; warm; pairSeeds; structuredSeeds(const)];
     scored = searchOnce(net, xMean, xStd, fTrain, seeds, const, ...
         modelBand, modelScore, nRestart, nPop, nGen, physPop, physGen);
     printDesign(scored, '本轮最优');
@@ -201,7 +221,7 @@ g1 = final.g1;
 g2 = final.g2;
 save(matPath, 'fPlot', 'fTrain', 'dMm', 'H1mm', 'H2mm', ...
     'af1', 'ab1', 'af2', 'ab2', 'final', 'ok', 'g1', 'g2', ...
-    'net', 'xMean', 'xStd', 'maeF', 'maeB');
+    'net', 'inverseNet', 'xMean', 'xStd', 'yMean', 'yStd', 'maeF', 'maeB');
 fprintf('图已保存到 %s\n', figPath);
 fprintf('曲线已保存到 %s\n', csvPath);
 fprintf('参数已保存到 %s\n', matPath);
@@ -1329,6 +1349,131 @@ for row = 1:size(data, 1)
     fprintf(fid, '%.0f,%.8f,%.8f,%.8f,%.8f\n', data(row, :));
 end
 fclose(fid);
+end
+
+function g = inputGradient(net, cache, dY)
+g = dY;
+nLayer = numel(net.W);
+for k = nLayer:-1:1
+    if strcmp(net.act{k}, 'relu')
+        g = g .* (cache.z{k} > 0);
+    end
+    g = net.W{k}.' * g;
+end
+end
+
+function inverseNet = trainInverse(inverseNet, forwardNet, X, Y, XVal, YVal, ...
+    yMean, yStd, epochs, batchSize, learnRate)
+adam = initAdam(inverseNet);
+n = size(X, 1);
+useBatch = min(batchSize, n);
+bestLoss = inf;
+bestNet = inverseNet;
+stall = 0;
+for epoch = 1:epochs
+    order = randperm(n);
+    totalSpec = 0;
+    totalGeom = 0;
+    seen = 0;
+    for s = 1:useBatch:n
+        batch = order(s:min(s + useBatch - 1, n));
+        Yb = Y(batch, :);
+        Ys = (Yb - yMean) ./ yStd;
+        cacheI = mlpForward(inverseNet, Ys.');
+        xHat = cacheI.y;
+        cacheF = mlpForward(forwardNet, xHat);
+        specDiff = cacheF.y - Yb.';
+        geomDiff = xHat - X(batch, :).';
+        totalSpec = totalSpec + sum(specDiff(:) .^ 2);
+        totalGeom = totalGeom + sum(geomDiff(:) .^ 2);
+        seenSpec = numel(specDiff);
+        seenGeom = numel(geomDiff);
+        seen = seen + size(Yb, 1);
+        dX = (2 / seenGeom) * geomDiff + inputGradient(forwardNet, cacheF, (2 / seenSpec) * specDiff);
+        grads = mlpBackward(inverseNet, cacheI, dX);
+        [inverseNet, adam] = adamApply(inverseNet, adam, grads, learnRate);
+    end
+    valLoss = inverseValLoss(inverseNet, forwardNet, XVal, YVal, yMean, yStd);
+    fprintf('逆向网络 epoch %02d  频谱mse=%.6e  尺寸mse=%.6e  验证频谱mse=%.6e\n', ...
+        epoch, totalSpec / max(seen * size(Y, 2), 1), totalGeom / max(seen * size(X, 2), 1), valLoss);
+    flushOut();
+    if valLoss + 1e-6 < bestLoss
+        bestLoss = valLoss;
+        bestNet = copyNet(inverseNet);
+        stall = 0;
+    else
+        stall = stall + 1;
+    end
+    if epoch >= max(4, round(epochs / 2)) && stall >= 6
+        fprintf('逆向网络验证误差停住，采用此前的最优权重。\n');
+        break;
+    end
+end
+inverseNet = bestNet;
+end
+
+function value = inverseValLoss(inverseNet, forwardNet, X, Y, yMean, yStd)
+Ys = (Y - yMean) ./ yStd;
+xHat = mlpPredict(inverseNet, Ys);
+yHat = mlpPredict(forwardNet, xHat);
+value = mean((yHat(:) - Y(:)) .^ 2);
+end
+
+function reportInverse(inverseNet, forwardNet, X, Y, yMean, yStd, name)
+Ys = (Y - yMean) ./ yStd;
+xHat = mlpPredict(inverseNet, Ys);
+yHat = mlpPredict(forwardNet, xHat);
+mae = mean(abs(yHat(:) - Y(:)));
+rValue = pearsonR(Y, yHat);
+fprintf('%s  逆向再正向  吸声 MAE %.4f  R %.4f\n', name, mae, rValue);
+end
+
+function seeds = inverseDesignSeeds(inverseNet, f, xMean, xStd, yMean, yStd, const)
+[Ylead, Ylag] = targetSpectra(f);
+xLead = decodeInverse(inverseNet, Ylead, xMean, xStd, yMean, yStd, const);
+xLag = decodeInverse(inverseNet, Ylag, xMean, xStd, yMean, yStd, const);
+n1 = size(xLead, 1);
+n2 = size(xLag, 1);
+seeds = zeros(n1 * n2, 28);
+row = 0;
+for i = 1:n1
+    for j = 1:n2
+        row = row + 1;
+        d = 0.5 * (xLead(i, 1:12) + xLag(j, 1:12));
+        seeds(row, :) = [d, xLead(i, 13:20), xLag(j, 13:20)];
+    end
+end
+seeds = clampDesign(seeds, const);
+fprintf('逆向网络给出 %d 个两态初解。\n', size(seeds, 1));
+end
+
+function Xmm = decodeInverse(inverseNet, Y, xMean, xStd, yMean, yStd, const)
+Ys = (Y - yMean) ./ yStd;
+Xstd = mlpPredict(inverseNet, Ys);
+Xmm = Xstd .* xStd + xMean;
+Xmm = clampDesign(Xmm, const);
+end
+
+function [Ylead, Ylag] = targetSpectra(f)
+f = f(:).';
+band = double(f >= 300 & f <= 500);
+peak = exp(-((f - 400) / 70) .^ 2);
+base = 0.12 * ones(size(f));
+leadLevel = [0.85; 0.70];
+lagLevel = [0.08; 0.12];
+nShape = 2 + 1;
+Ylead = zeros(nShape, 2 * numel(f));
+Ylag = zeros(nShape, 2 * numel(f));
+for i = 1:2
+    af = base + leadLevel(i) * band;
+    ab = base + lagLevel(i) * band;
+    Ylead(i, :) = [af, ab];
+    Ylag(i, :) = [ab, af];
+end
+af = base + 0.8 * peak;
+ab = base + 0.05 * peak;
+Ylead(3, :) = [af, ab];
+Ylag(3, :) = [ab, af];
 end
 
 function plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, outDir)
