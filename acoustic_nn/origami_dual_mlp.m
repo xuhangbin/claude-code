@@ -114,24 +114,16 @@ fprintf('加入配对样本后共 %d 组。\n', size(X, 1));
 yWeight = spectrumWeight(fTrain);
 
 nSpec = 2 * numel(fTrain);
-fprintf('\n===== 训练正向网络：每个频率单独预测，25 -> 256 -> 256 -> 128 -> 2 =====\n');
-net = initMLP([25, 256, 256, 128, 2], {'relu', 'relu', 'relu', 'linear'});
-net.mode = 'freq';
-[net, history] = trainFreqRegressor(net, XTrain, YTrain, XVal, YVal, fTrain, ...
-    maxEpoch, minEpoch, learnRate, '正向网络');
-[testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
-
-yMean = mean(YTrain, 1);
-yStd = std(YTrain, 0, 1);
-yStd(yStd < 1e-12) = 1;
-fprintf('\n===== 训练逆向网络：%d -> 256 -> 256 -> 128 -> 20 =====\n', nSpec);
-fprintf('正向网络已冻住。逆向网络先给出尺寸，再送进正向网络，让还原出的曲线贴近原曲线。\n');
-inverseNet = initMLP([nSpec, 256, 256, 128, 20], {'relu', 'relu', 'relu', 'linear'});
-inverseNet = trainInverse(inverseNet, net, XTrain, YTrain, XVal, YVal, ...
-    yMean, yStd, fTrain, invEpoch, batchSize, learnRate);
-reportInverse(inverseNet, net, XTest, YTest, yMean, yStd, fTrain, '测试集');
-
 if accuracyOnly
+    fprintf('\n===== 训练正向网络：每个频率单独预测，25 -> 256 -> 256 -> 128 -> 2 =====\n');
+    net = initMLP([25, 256, 256, 128, 2], {'relu', 'relu', 'relu', 'linear'});
+    net.mode = 'freq';
+    [net, history] = trainFreqRegressor(net, XTrain, YTrain, XVal, YVal, fTrain, ...
+        maxEpoch, minEpoch, learnRate, '正向网络');
+    [testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
+    yMean = mean(YTrain, 1);
+    yStd = std(YTrain, 0, 1);
+    yStd(yStd < 1e-12) = 1;
     outDir = fileparts(mfilename('fullpath'));
     if isempty(outDir)
         outDir = pwd;
@@ -141,58 +133,39 @@ if accuracyOnly
     return;
 end
 
-modelBand = prepareModel(fBand, const);
-modelScore = prepareModel(fScore, const);
+fprintf('\n===== 训练正向网络：20 -> 64 -> 128 -> 128 -> %d =====\n', nSpec);
+net = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
+fwdEpoch = 2;
+if ~quick
+    fwdEpoch = 36;
+end
+[net, history] = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
+    fwdEpoch, max(1, round(fwdEpoch / 2)), batchSize, learnRate, yWeight, '正向网络');
+[testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
+
+nPairDesign = 400;
+if ~quick
+    nPairDesign = 8000;
+end
+fprintf('\n生成 %d 组两态样本，供逆向网络学习。\n', nPairDesign);
+[X28, Y4] = buildTwoStateSet(nPairDesign, fTrain, modelTrain, const);
+[X28s, X28mean, X28std, Y4s, Y4mean, Y4std] = standardizePair(X28, Y4);
+nSpec4 = size(Y4, 2);
+fprintf('===== 训练逆向网络：%d -> 256 -> 256 -> 128 -> 28 =====\n', nSpec4);
+inverseNet = initMLP([nSpec4, 256, 256, 128, 28], {'relu', 'relu', 'relu', 'linear'});
+inverseNet = trainRegressor(inverseNet, Y4s, X28s, Y4s, X28s, ...
+    fwdEpoch, max(1, round(fwdEpoch / 2)), batchSize, learnRate, ones(1, 28), '逆向网络');
+
+Ytarget = requirementSpectra(fTrain);
+xStd = mlpPredict(inverseNet, (Ytarget - Y4mean) ./ Y4std);
+xMm = clampDesign(xStd .* X28std + X28mean, const);
+fprintf('逆向网络已由目标曲线给出尺寸。正向网络复原曲线，传递矩阵核算最终吸声。\n');
 modelPlot = prepareModel(fPlot, const);
 
-invSeeds = inverseDesignSeeds(inverseNet, fTrain, xMean, xStd, yMean, yStd, const);
-infoInv = physicsInfo(invSeeds, fScore, modelScore);
-[~, invKey] = max(rankKey(infoInv));
-fprintf('逆向初解  状态1差 %.4f  状态2差 %.4f\n', infoInv.g1(invKey), infoInv.g2(invKey));
-
-best = [];
-for roundId = 1:maxRounds
-    fprintf('\n===== 第 %d 轮：正向网络搜索，传递矩阵复核 =====\n', roundId);
-    warm = [ ...
-        4.13987519, 1.00000000, 3.83105896, 7.00000000, 6.77207171, 1.00000000, ...
-        1.00000000, 7.00000000, 6.94331789, 7.00000000, 1.00000000, 7.00000000, ...
-        77.29898187, 10.57697070, 51.72463418, 80, 10, 25.72288141, 80, 53.39645462, ...
-        32.98254136, 77.31856689, 10.18986936, 10, 75.03983407, 80, 10, 80; ...
-        3.159769, 0.36, 4.713910, 3.619750, 8, 6.944, ...
-        4.825182, 0.10, 3.069580, 4.422677, 1.197, 0.10, ...
-        48.162747, 10, 46.210000, 10, 28.311400, 10, 58.179000, 19.998762, ...
-        10.638192, 59, 42.788603, 59, 36.744369, 59, 20.055518, 10];
-    seeds = [invSeeds; warm; pairSeeds; structuredSeeds(const)];
-    scored = searchOnce(net, xMean, xStd, fTrain, seeds, const, ...
-        modelBand, modelScore, nRestart, nPop, nGen, physPop, physGen);
-    printDesign(scored, '本轮最优');
-    if isempty(best) || betterDesign(scored, best)
-        best = scored;
-    end
-    if scored.ok
-        fprintf('传递矩阵判定两态都大于 0.4，停止搜索。\n');
-        break;
-    end
-    if roundId == maxRounds
-        break;
-    end
-    fprintf('尚未达标。在较优几何附近补样本并继续训练。\n');
-    [Xn, Yn] = refineCloud(scored.pool, fTrain, modelTrain, const, quick);
-    XTrain = [XTrain; standardizeRows(Xn, xMean, xStd)]; %#ok<AGROW>
-    YTrain = [YTrain; Yn]; %#ok<AGROW>
-    extra = 8;
-    if ~quick
-        extra = 14;
-    end
-    net = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
-        extra, extra, batchSize, learnRate, yWeight, '正向网络续训');
-    reportMae(net, XTest, YTest, fTrain, '续训后测试集');
-end
-
 fprintf('\n用 100:1:700 Hz 的传递矩阵计算最终曲线...\n');
-dMm = best.dMm;
-H1mm = best.H1mm;
-H2mm = best.H2mm;
+dMm = xMm(1:12);
+H1mm = xMm(13:20);
+H2mm = xMm(21:28);
 [af1, ab1, energy1] = acousticMm(dMm, H1mm, fPlot, modelPlot);
 [af2, ab2, energy2] = acousticMm(dMm, H2mm, fPlot, modelPlot);
 final = bandReport(fPlot, af1, ab1, af2, ab2);
@@ -219,11 +192,11 @@ plotTwoStates(fPlot, af1, ab1, af2, ab2, final, figPath);
 writeCurves(csvPath, fPlot, af1, ab1, af2, ab2);
 maeF = testMaeF;
 maeB = testMaeB;
-best.maeF = maeF;
-best.maeB = maeB;
 ok = final.ok;
 g1 = final.g1;
 g2 = final.g2;
+yMean = Y4mean;
+yStd = Y4std;
 save(matPath, 'fPlot', 'fTrain', 'dMm', 'H1mm', 'H2mm', ...
     'af1', 'ab1', 'af2', 'ab2', 'final', 'ok', 'g1', 'g2', ...
     'net', 'inverseNet', 'xMean', 'xStd', 'yMean', 'yStd', 'maeF', 'maeB');
@@ -1494,6 +1467,41 @@ for row = 1:size(data, 1)
     fprintf(fid, '%.0f,%.8f,%.8f,%.8f,%.8f\n', data(row, :));
 end
 fclose(fid);
+end
+
+function [X, Y] = buildTwoStateSet(n, f, model, const)
+d = const.dMin + (const.dMax - const.dMin) * rand(n, 12);
+H1 = const.Hmin + (const.Hmax - const.Hmin) * rand(n, 8);
+H2 = const.Hmin + (const.Hmax - const.Hmin) * rand(n, 8);
+[af1, ab1] = acousticChunk(d, H1, f, model, 32);
+[af2, ab2] = acousticChunk(d, H2, f, model, 32);
+X = [d, H1, H2];
+Y = [af1, ab1, af2, ab2];
+good = finiteSpectra(Y);
+X = X(good, :);
+Y = Y(good, :);
+fprintf('  两态样本 %d 组。\n', size(X, 1));
+end
+
+function [Xs, xMean, xStd, Ys, yMean, yStd] = standardizePair(X, Y)
+xMean = mean(X, 1);
+xStd = std(X, 0, 1);
+xStd(xStd < 1e-12) = 1;
+yMean = mean(Y, 1);
+yStd = std(Y, 0, 1);
+yStd(yStd < 1e-12) = 1;
+Xs = (X - xMean) ./ xStd;
+Ys = (Y - yMean) ./ yStd;
+end
+
+function Y = requirementSpectra(f)
+f = f(:).';
+w = max(0, 1 - abs(f - 400) / 120);
+af1 = 0.18 + 0.62 * w;
+ab1 = 0.20 - 0.08 * w;
+af2 = 0.18 + 0.10 * w;
+ab2 = 0.16 + 0.64 * w;
+Y = [af1, ab1, af2, ab2];
 end
 
 function g = inputGradient(net, cache, dY)
