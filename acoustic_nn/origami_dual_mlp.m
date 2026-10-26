@@ -55,6 +55,8 @@ if strcmp(mode, 'verify') || strcmp(mode, 'bench')
     return;
 end
 
+accuracyOnly = strcmp(mode, 'accuracy');
+
 quick = strcmp(mode, 'quick');
 if quick
     nSamples = 192;
@@ -104,9 +106,19 @@ yWeight = spectrumWeight(fTrain);
 nSpec = 2 * numel(fTrain);
 fprintf('\n===== 训练正向网络：20 -> 64 -> 128 -> 128 -> %d =====\n', nSpec);
 net = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
-net = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
+[net, history] = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
     maxEpoch, minEpoch, batchSize, learnRate, yWeight, '正向网络');
 [testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
+
+if accuracyOnly
+    outDir = fileparts(mfilename('fullpath'));
+    if isempty(outDir)
+        outDir = pwd;
+    end
+    plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, outDir);
+    fprintf('精度图已保存。\n');
+    return;
+end
 
 modelBand = prepareModel(fBand, const);
 modelScore = prepareModel(fScore, const);
@@ -799,7 +811,7 @@ for k = 1:numel(net.W)
 end
 end
 
-function net = trainRegressor(net, X, Y, XVal, YVal, epochs, minEpoch, batchSize, learnRate, yWeight, name)
+function [net, history] = trainRegressor(net, X, Y, XVal, YVal, epochs, minEpoch, batchSize, learnRate, yWeight, name)
 adam = initAdam(net);
 n = size(X, 1);
 useBatch = min(batchSize, n);
@@ -807,21 +819,30 @@ w = yWeight(:);
 bestMae = inf;
 bestNet = net;
 stall = 0;
+history.epoch = [];
+history.trainMse = [];
+history.valMse = [];
 for epoch = 1:epochs
     order = randperm(n);
     total = 0;
+    plain = 0;
     seen = 0;
     for s = 1:useBatch:n
         batch = order(s:min(s + useBatch - 1, n));
         cache = mlpForward(net, X(batch, :).');
         diff = cache.y - Y(batch, :).';
         total = total + sum(sum((diff .^ 2) .* w));
+        plain = plain + sum(diff(:) .^ 2);
         seen = seen + numel(diff);
         grads = mlpBackward(net, cache, (2 / numel(diff)) * (diff .* w));
         [net, adam] = adamApply(net, adam, grads, learnRate);
     end
     pred = mlpPredict(net, XVal);
     mae = mean(abs(pred(:) - YVal(:)));
+    valMse = mean((pred(:) - YVal(:)) .^ 2);
+    history.epoch(end + 1) = epoch; %#ok<AGROW>
+    history.trainMse(end + 1) = plain / max(seen, 1); %#ok<AGROW>
+    history.valMse(end + 1) = valMse; %#ok<AGROW>
     fprintf('%s epoch %02d  train_wmse=%.6e  val_mae=%.6e\n', ...
         name, epoch, total / max(seen, 1), mae);
     flushOut();
@@ -1305,6 +1326,136 @@ fprintf(fid, 'f_Hz,state1_forward,state1_backward,state2_forward,state2_backward
 data = [f(:), af1(:), ab1(:), af2(:), ab2(:)];
 for row = 1:size(data, 1)
     fprintf(fid, '%.0f,%.8f,%.8f,%.8f,%.8f\n', data(row, :));
+end
+fclose(fid);
+end
+
+function plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, outDir)
+predTrain = mlpPredict(net, XTrain);
+predVal = mlpPredict(net, XVal);
+predTest = mlpPredict(net, XTest);
+errTrain = relativeError(predTrain, YTrain);
+errVal = relativeError(predVal, YVal);
+errTest = relativeError(predTest, YTest);
+rVal = pearsonR(YVal, predVal);
+rTest = pearsonR(YTest, predTest);
+
+fig = figure('Color', 'w', 'Position', [60, 40, 980, 760], 'Visible', 'off');
+subplot(2, 2, 1);
+plot(history.epoch, history.trainMse, 'b-', 'LineWidth', 1.6);
+hold on;
+plot(history.epoch, history.valMse, 'r--', 'LineWidth', 1.6);
+grid on; box on;
+xlabel('Epochs');
+ylabel('MSE');
+title('(a)');
+legend({'Training dataset', 'Validation dataset'}, 'Location', 'northeast');
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12, 'LineWidth', 1.0, 'TickDir', 'in');
+
+subplot(2, 2, 2);
+hi = prctileSafe([errTrain; errVal; errTest], 99);
+edges = linspace(0, max(hi, 1e-4), 18);
+cTrain = histCount(errTrain, edges);
+cVal = histCount(errVal, edges);
+cTest = histCount(errTest, edges);
+centers = (edges(1:end - 1) + edges(2:end)) / 2;
+bar(centers, [cTrain, cVal, cTest], 'stacked');
+grid on; box on;
+xlabel('Mean relative error');
+ylabel('Samples');
+title('(b)');
+legend({'Training dataset', 'Validation dataset', 'Test dataset'}, 'Location', 'northeast');
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12, 'LineWidth', 1.0, 'TickDir', 'in');
+
+subplot(2, 2, 3);
+drawScatter(YVal, predVal, rVal, '(c)  Validation dataset');
+subplot(2, 2, 4);
+drawScatter(YTest, predTest, rTest, '(d)  Test dataset');
+
+print(fig, fullfile(outDir, 'origami_nn_accuracy.png'), '-dpng', '-r140');
+close(fig);
+writeAccuracyCsv(outDir, history, centers, cTrain, cVal, cTest, YVal, predVal, YTest, predTest, rVal, rTest);
+fprintf('验证集 R = %.4f，测试集 R = %.4f\n', rVal, rTest);
+end
+
+function value = relativeError(pred, actual)
+num = mean(abs(pred - actual), 2);
+den = max(mean(abs(actual), 2), 1e-3);
+value = num ./ den;
+end
+
+function value = pearsonR(actual, pred)
+a = actual(:) - mean(actual(:));
+p = pred(:) - mean(pred(:));
+value = sum(a .* p) / sqrt(sum(a .^ 2) * sum(p .^ 2));
+end
+
+function q = prctileSafe(v, pct)
+v = sort(v(:));
+if isempty(v)
+    q = 0;
+    return;
+end
+idx = max(1, min(numel(v), ceil(pct / 100 * numel(v))));
+q = v(idx);
+end
+
+function counts = histCount(v, edges)
+counts = histc(v(:), edges);
+counts = counts(1:end - 1);
+counts = counts(:);
+end
+
+function drawScatter(actual, pred, rValue, name)
+n = numel(actual);
+take = min(n, 25000);
+pick = randperm(n, take);
+a = actual(pick);
+p = pred(pick);
+plot(a, p, '.', 'Color', [0.15, 0.35, 0.75], 'MarkerSize', 4);
+hold on;
+plot([0, 1], [0, 1], 'r-', 'LineWidth', 1.4);
+grid on; box on;
+xlim([0, 1]);
+ylim([0, 1]);
+xlabel('Actual values');
+ylabel('Predicted values');
+title(name);
+text(0.06, 0.90, sprintf('R = %.3f', rValue), 'Color', [0.85, 0.15, 0.15], ...
+    'FontName', 'Times New Roman', 'FontSize', 14);
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12, 'LineWidth', 1.0, 'TickDir', 'in');
+end
+
+function writeAccuracyCsv(outDir, history, centers, cTrain, cVal, cTest, YVal, predVal, YTest, predTest, rVal, rTest)
+writeVectorCsv(fullfile(outDir, 'nn_accuracy_loss.csv'), ...
+    {'epoch', 'train_mse', 'val_mse'}, ...
+    [history.epoch(:), history.trainMse(:), history.valMse(:)]);
+writeVectorCsv(fullfile(outDir, 'nn_accuracy_hist.csv'), ...
+    {'bin_center', 'train_count', 'val_count', 'test_count'}, ...
+    [centers(:), cTrain, cVal, cTest]);
+sampleScatter(fullfile(outDir, 'nn_accuracy_val.csv'), YVal, predVal);
+sampleScatter(fullfile(outDir, 'nn_accuracy_test.csv'), YTest, predTest);
+fid = fopen(fullfile(outDir, 'nn_accuracy_R.csv'), 'w');
+fprintf(fid, 'dataset,R\nvalidation,%.6f\ntest,%.6f\n', rVal, rTest);
+fclose(fid);
+end
+
+function sampleScatter(path, actual, pred)
+n = numel(actual);
+take = min(n, 20000);
+pick = randperm(n, take);
+writeVectorCsv(path, {'actual', 'predicted'}, [actual(pick), pred(pick)]);
+end
+
+function writeVectorCsv(path, header, data)
+fid = fopen(path, 'w');
+fprintf(fid, '%s\n', strjoin(header, ','));
+for row = 1:size(data, 1)
+    fprintf(fid, '%.8g', data(row, 1));
+    for col = 2:size(data, 2)
+        fprintf(fid, ',%.8g', data(row, col));
+    end
+    fprintf(fid, '\n');
 end
 fclose(fid);
 end
