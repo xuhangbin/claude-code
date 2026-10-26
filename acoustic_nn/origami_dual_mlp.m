@@ -22,6 +22,11 @@ end
 
 rng(1);
 
+if strcmp(getenv('RUN_MODE'), 'replot')
+    replotSaved();
+    return;
+end
+
 quick = strcmp(getenv('RUN_MODE'), 'quick');
 
 const = makeConst();
@@ -1051,7 +1056,7 @@ plot(f([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 0.8, 'HandleVisibility', 'off')
 labelPeak(f, af1, '正向吸声', 'b', []);
 labelPeak(f, ab1, '反向吸声', 'r', info.fp1);
 styleAxis(f, '状态1：蓝实线=正向吸声（宽带），红虚线=反向吸声（窄带）');
-legend([hF1, hB1], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
+legend([hF1, hB1], {'正向吸声', '反向吸声'}, 'Location', legendSpot(f, af1, ab1));
 
 subplot(2, 1, 2);
 hold on;
@@ -1062,7 +1067,7 @@ plot(f([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 0.8, 'HandleVisibility', 'off')
 labelPeak(f, af2, '正向吸声', 'b', info.fp2);
 labelPeak(f, ab2, '反向吸声', 'r', []);
 styleAxis(f, '状态2：蓝实线=正向吸声（窄带），红虚线=反向吸声（宽带）');
-legend([hF2, hB2], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
+legend([hF2, hB2], {'正向吸声', '反向吸声'}, 'Location', legendSpot(f, af2, ab2));
 
 print(fig, figPath, '-dpng', '-r140');
 close(fig);
@@ -1092,16 +1097,45 @@ else
     x = f(ix);
     pk = a(ix);
 end
-if x > f(1) + 0.78 * (f(end) - f(1))
+xText = x;
+if x > f(end) - 30
     align = 'right';
-elseif x < f(1) + 0.22 * (f(end) - f(1))
+    xText = f(end) - 6;
+elseif x < f(1) + 30
     align = 'left';
+    xText = f(1) + 6;
 else
     align = 'center';
 end
-text(x, min(pk + 0.035, 1.08), label, 'Color', color, ...
+text(xText, min(max(pk + 0.04, 0.08), 1.08), label, 'Color', color, ...
     'HorizontalAlignment', align, 'VerticalAlignment', 'bottom', ...
-    'FontSize', 11, 'Clipping', 'on');
+    'FontSize', 11, 'Clipping', 'off');
+end
+
+function loc = legendSpot(f, af, ab)
+right = f >= (f(end) - 90);
+left = f <= (f(1) + 140);
+if max([af(right), ab(right)]) > 0.7
+    if max([af(left), ab(left)]) < 0.4
+        loc = 'northwest';
+    else
+        loc = 'southwest';
+    end
+else
+    loc = 'northeast';
+end
+end
+
+function replotSaved()
+outDir = fileparts(mfilename('fullpath'));
+if isempty(outDir)
+    outDir = pwd;
+end
+resultPath = fullfile(outDir, 'origami_two_state.mat');
+figPath = fullfile(outDir, 'origami_two_state.png');
+saved = load(resultPath);
+plotTwoStates(saved.fPlot, saved.af1, saved.ab1, saved.af2, saved.ab2, saved.report, figPath);
+fprintf('图已重画到 %s\n', figPath);
 end
 
 function flushOut()
