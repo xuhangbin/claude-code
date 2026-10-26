@@ -1,379 +1,432 @@
-function origami_dual_mlp
-% 四单胞折纸腔的双 MLP
+% 折纸腔三段微穿孔板的双 MLP 代理与两状态搜索
 %
-% 物理和 origami_four_cell.m 相同：每个单胞三块微穿孔板、两个折纸腔。
-% 折纸腔先按体积公式得到等效高度，传递矩阵用等效高度。
-% 每个腔的实际高度搜索范围是 0.5–54 mm。孔径 0.1–8 mm。
+% 物理模型是 acoustic_nn/origami_cavity_mpp.m 里的单管道：
+%   三块微穿孔板（厚度 2 mm，每块 1 个孔）夹两个折纸腔。
+%   孔径 d1、d2、d3 两态共用，状态 2 只改两个腔的实际高度。
+%   折纸几何固定：a=30 mm，hc=20 mm，n0=3，beta=45°。
+%   实际高度 0.5–54 mm。等效高度进入腔体传递矩阵，透射相位用实际高度。
 %
-% 两种状态共用 12 个孔径，只改 8 个实际腔高。
-% 状态 1：正向在某段约 200 Hz 上平均吸声更高，反向是窄峰。
-% 状态 2：反过来。窄峰要移动 100 Hz 以上。
+% 正向网络  5 -> 64 -> 128 -> 128 -> 2*Nf
+% 逆向网络  2*Nf -> 256 -> 256 -> 128 -> 5
+% 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3，损失 MSE。
+% 训练频率 linspace(100,600,101)。最后用传递矩阵在 100:1:600 Hz 上核对并画图。
 %
-% 运行：origami_dual_mlp
+% 直接运行本文件。不需要 Deep Learning Toolbox。
 % 短流程：setenv('RUN_MODE','quick'); origami_dual_mlp
 
-clc;
-close all;
-rng(7);
+function origami_dual_mlp
 
-quick = strcmp(getenv('RUN_MODE'), 'quick');
-if quick
-    nSamples = 2048;
-    maxEpochs = 4;
-    nRestart = 2;
-    popSize = 24;
-    nGen = 8;
-else
-    nSamples = 60000;
-    maxEpochs = 16;
-    nRestart = 6;
-    popSize = 48;
-    nGen = 25;
+if exist('OCTAVE_VERSION', 'builtin')
+    page_output_immediately(1);
 end
 
+rng(1);
+
+quick = strcmp(getenv('RUN_MODE'), 'quick');
+
+const = makeConst();
 fTrain = linspace(100, 600, 101);
 fPlot = 100:1:600;
-air = airProps();
-geom = geomProps();
-model = geom;
-model.air = air;
-[model.kEff, model.zEff] = ductStinson(fTrain, air, geom.W, geom.L, geom.stinsonN);
 
-dNom = 1e-3 * repmat([2.75, 1.73, 0.42], 1, 4);
-hNom = 1e-3 * 47 * ones(1, 8);
-[af0, ab0] = origamiResponse(dNom, hNom, fTrain, model);
-fprintf('名义点 100–600 Hz 平均正向 %.4f，平均反向 %.4f\n', mean(af0), mean(ab0));
-Heq = equivalentHeight(1e-3 * 47 * ones(4, 2));
-fprintf('H = 47 mm 时等效高度 %.4f mm\n', Heq(1, 1) * 1e3);
+if quick
+    nBase = 500;
+    nPert = 2;
+    maxHot = 60;
+    maxEpoch = 2;
+    invEpoch = 1;
+    nRestart = 2;
+    nPop = 16;
+    nGen = 2;
+    nRandom = 240;
+    maxRounds = 1;
+    batchSize = 128;
+else
+    nBase = 20000;
+    nPert = 5;
+    maxHot = 2500;
+    maxEpoch = 48;
+    invEpoch = 16;
+    nRestart = 8;
+    nPop = 64;
+    nGen = 28;
+    nRandom = 36000;
+    maxRounds = 3;
+    batchSize = 256;
+end
+learnRate = 1e-3;
 
-dLower = 0.1e-3 * ones(1, 12);
-dUpper = 8e-3 * ones(1, 12);
-hLower = 0.5e-3 * ones(1, 8);
-hUpper = 54e-3 * ones(1, 8);
+%% 样本点与体积自检
 
-fprintf('生成 %d 组样本...\n', nSamples);
-[X, Y] = generateDataset(nSamples, fTrain, model, dLower, dUpper, hLower, hUpper, 256);
-nTrain = floor(0.8 * nSamples);
-nVal = floor(0.1 * nSamples);
-nTest = nSamples - nTrain - nVal;
-XTrain = X(1:nTrain, :);
-YTrain = Y(1:nTrain, :);
-XVal = X(nTrain + (1:nVal), :);
-YVal = Y(nTrain + (1:nVal), :);
-XTest = X(nTrain + nVal + (1:nTest), :);
-YTest = Y(nTrain + nVal + (1:nTest), :);
+verifyPhysics(const, fPlot);
+
+if strcmp(getenv('RUN_MODE'), 'verify')
+    fprintf('只做物理自检，到此结束。\n');
+    return;
+end
+
+checkNetworkGradient();
+
+%% 数据集：均匀样本，再在高吸声样本附近加密
+
+fprintf('生成训练集（均匀 %d 组，并在高峰附近扰动）...\n', nBase);
+[X, Y] = buildDataset(nBase, nPert, maxHot, fTrain, const);
+fprintf('可用样本 %d 组。\n', size(X, 1));
+
+nVal = max(200, round(0.1 * size(X, 1)));
+nVal = min(nVal, size(X, 1) - 2);
+perm = randperm(size(X, 1));
+X = X(perm, :);
+Y = Y(perm, :);
+XVal = X(1:nVal, :);
+YVal = Y(1:nVal, :);
+XTrain = X(nVal + 1:end, :);
+YTrain = Y(nVal + 1:end, :);
 
 xMean = mean(XTrain, 1);
 xStd = std(XTrain, 0, 1);
 xStd(xStd < 1e-12) = 1;
+yMean = mean(YTrain, 1);
+yStd = std(YTrain, 0, 1);
+yStd(yStd < 1e-12) = 1;
+
 XTrainS = (XTrain - xMean) ./ xStd;
 XValS = (XVal - xMean) ./ xStd;
-XTestS = (XTest - xMean) ./ xStd;
+
+%% 正向网络
 
 nSpec = 2 * numel(fTrain);
-fprintf('训练正向网络...\n');
-forwardNet = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
-forwardNet = trainRegressor(forwardNet, XTrainS, YTrain, XValS, YVal, maxEpochs, 256, 1e-3);
-YHat = mlpPredict(forwardNet, XTestS);
+fprintf('\n===== 训练正向网络：5 -> 64 -> 128 -> 128 -> %d =====\n', nSpec);
+forwardNet = initMLP([5, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
+minEpoch = 2;
+if ~quick
+    minEpoch = 24;
+end
+forwardNet = trainRegressor(forwardNet, XTrainS, YTrain, XValS, YVal, ...
+    maxEpoch, minEpoch, batchSize, learnRate, '正向网络');
+
+YHat = mlpPredict(forwardNet, XValS);
 nf = numel(fTrain);
-maeF = mean(abs(YHat(:, 1:nf) - YTest(:, 1:nf)), 'all');
-maeB = mean(abs(YHat(:, nf + 1:end) - YTest(:, nf + 1:end)), 'all');
-fprintf('测试集 MAE  正向 %.4f  反向 %.4f\n', maeF, maeB);
+maeF = mean(mean(abs(YHat(:, 1:nf) - YVal(:, 1:nf))));
+maeB = mean(mean(abs(YHat(:, nf + 1:end) - YVal(:, nf + 1:end))));
+fprintf('验证集 MAE  正向 %.4f  反向 %.4f\n', maeF, maeB);
+flushOut();
 
-[kPlot, zPlot] = ductStinson(fPlot, air, geom.W, geom.L, geom.stinsonN);
-modelPlot = model;
-modelPlot.kEff = kPlot;
-modelPlot.zEff = zPlot;
+%% 逆向网络（冻住正向网络）
 
-fprintf('用正向网络搜索两种腔高，再用传递矩阵挑选...\n');
-bestPhys = inf;
-xBest = [];
-af1 = [];
-ab1 = [];
-af2 = [];
-ab2 = [];
-for iRestart = 1:nRestart
-    rng(2000 + iRestart);
-    xTry = shapeSearch(forwardNet, xMean, xStd, fTrain, ...
-        dLower, dUpper, hLower, hUpper, popSize, nGen);
-    [afTry1, abTry1] = origamiResponse(xTry(1:12), xTry(13:20), fPlot, modelPlot);
-    [afTry2, abTry2] = origamiResponse(xTry(1:12), xTry(21:28), fPlot, modelPlot);
-    phys = curveLoss(fPlot, afTry1, abTry1, afTry2, abTry2);
-    fprintf('第 %d 组  传递矩阵适应度 %.4f\n', iRestart, phys);
-    if phys < bestPhys
-        bestPhys = phys;
-        xBest = xTry;
-        af1 = afTry1;
-        ab1 = abTry1;
-        af2 = afTry2;
-        ab2 = abTry2;
+fprintf('\n===== 训练逆向网络：%d -> 256 -> 256 -> 128 -> 5 =====\n', nSpec);
+YTrainS = (YTrain - yMean) ./ yStd;
+YValS = (YVal - yMean) ./ yStd;
+inverseNet = initMLP([nSpec, 256, 256, 128, 5], {'relu', 'relu', 'relu', 'linear'});
+inverseNet = trainAutoencoder(inverseNet, forwardNet, YTrainS, YTrain, ...
+    YValS, YVal, invEpoch, batchSize, learnRate);
+
+%% 用网络搜索，再用传递矩阵打分。未达标就在高峰附近补样本继续训。
+
+lo = [const.dMin, const.dMin, const.dMin, const.Hmin, const.Hmin, const.Hmin, const.Hmin];
+hi = [const.dMax, const.dMax, const.dMax, const.Hmax, const.Hmax, const.Hmax, const.Hmax];
+
+best = [];
+for roundId = 1:maxRounds
+    fprintf('\n===== 第 %d 轮：网络搜索，传递矩阵复算 =====\n', roundId);
+    seeds = inverseSeeds(inverseNet, fTrain, yMean, yStd, xMean, xStd, lo, hi);
+    nominal = [2.75, 1.73, 0.42, 54, 42, 20, 30];
+    seeds = [nominal; seeds]; %#ok<AGROW>
+    seeds = min(max(seeds, lo), hi);
+
+    pool = proposePool(forwardNet, xMean, xStd, fTrain, seeds, ...
+        lo, hi, nRestart, nPop, nGen, nRandom);
+    fprintf('传递矩阵复算 %d 个候选...\n', size(pool, 1));
+    scored = rankByPhysics(pool, fPlot, const);
+    printReport(scored.report, '本轮最优');
+    if isempty(best) || betterDesign(scored, best)
+        best = scored;
     end
+    if scored.report.allOk
+        fprintf('传递矩阵判定两态都达标，停止搜索。\n');
+        break;
+    end
+    if roundId == maxRounds
+        break;
+    end
+    centers = scored.centers;
+    fprintf('未达标。在 %d 个较优几何附近补样本并继续训练正向网络。\n', size(centers, 1));
+    [Xn, Yn] = resonantCloud(centers, fTrain, const, quick);
+    XTrain = [XTrain; Xn]; %#ok<AGROW>
+    YTrain = [YTrain; Yn]; %#ok<AGROW>
+    XTrainS = (XTrain - xMean) ./ xStd;
+    extraEpoch = 8;
+    if ~quick
+        extraEpoch = 16;
+    end
+    forwardNet = trainRegressor(forwardNet, XTrainS, YTrain, XValS, YVal, ...
+        extraEpoch, extraEpoch, batchSize, learnRate, '正向网络续训');
+    inverseNet = trainAutoencoder(inverseNet, forwardNet, ...
+        (YTrain - yMean) ./ yStd, YTrain, YValS, YVal, ...
+        max(1, round(invEpoch / 2)), batchSize, learnRate);
+    flushOut();
 end
 
-dBest = xBest(1:12);
-hBest1 = xBest(13:20);
-hBest2 = xBest(21:28);
-reportShape('传递矩阵 状态1', fPlot, af1, ab1, true);
-reportShape('传递矩阵 状态2', fPlot, af2, ab2, false);
-[~, ~, fN1] = absorptionWidth(fPlot, ab1);
-[~, ~, fN2] = absorptionWidth(fPlot, af2);
-fprintf('窄带峰从 %.0f Hz 移到 %.0f Hz，移动 %.0f Hz。\n', fN1, fN2, abs(fN2 - fN1));
-fprintf('传递矩阵适应度 %.6f\n', bestPhys);
+report = best.report;
+dMm = best.dMm;
+H1mm = best.H1mm;
+H2mm = best.H2mm;
+af1 = best.af1;
+ab1 = best.ab1;
+af2 = best.af2;
+ab2 = best.ab2;
 
-fprintf('\n共用孔径 (mm)\n');
-disp(reshape(dBest, 3, 4).' * 1e3);
-fprintf('状态 1 实际腔高 (mm)\n');
-disp(reshape(hBest1, 2, 4).' * 1e3);
-fprintf('状态 2 实际腔高 (mm)\n');
-disp(reshape(hBest2, 2, 4).' * 1e3);
-fprintf('状态 1 等效腔高 (mm)\n');
-disp(equivalentHeight(reshape(hBest1, 2, 4).') * 1e3);
-fprintf('状态 2 等效腔高 (mm)\n');
-disp(equivalentHeight(reshape(hBest2, 2, 4).') * 1e3);
+[~, ~, report.energy1] = acousticBatch(dMm, H1mm, fPlot, const);
+[~, ~, report.energy2] = acousticBatch(dMm, H2mm, fPlot, const);
 
-[~, ~, fLo1, fHi1] = bestWindow(fPlot, af1, ab1);
-[~, ~, fLo2, fHi2] = bestWindow(fPlot, ab2, af2);
-fig = figure('Color', 'w', 'Position', [80, 40, 980, 760]);
-if exist('OCTAVE_VERSION', 'builtin')
-    set(fig, 'defaultaxesfontname', 'WenQuanYi Micro Hei');
-    set(fig, 'defaulttextfontname', 'WenQuanYi Micro Hei');
-end
-subplot(2, 1, 1);
-hold on;
-patch([fLo1, fHi1, fHi1, fLo1], [0, 0, 1, 1], [0.75, 0.85, 1], ...
-    'FaceAlpha', 0.18, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-hF = plot(fPlot, af1, 'b-', 'LineWidth', 1.8);
-hB = plot(fPlot, ab1, 'r--', 'LineWidth', 1.8);
-hL = plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
-markPeak(fPlot, af1, '正向', 'b');
-markPeak(fPlot, ab1, '反向', 'r');
-grid on; box on;
-xlim([100, 600]); ylim([0, 1.05]);
-xlabel('Frequency (Hz)'); ylabel('Absorption');
-title('状态1：蓝实线=正向吸声（宽带），红虚线=反向吸声（窄带）');
-legend([hF, hB, hL], {'正向吸声', '反向吸声', '0.5'}, 'Location', 'northeast');
-
-subplot(2, 1, 2);
-hold on;
-patch([fLo2, fHi2, fHi2, fLo2], [0, 0, 1, 1], [1, 0.85, 0.75], ...
-    'FaceAlpha', 0.18, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-hF = plot(fPlot, af2, 'b-', 'LineWidth', 1.8);
-hB = plot(fPlot, ab2, 'r--', 'LineWidth', 1.8);
-hL = plot(fPlot([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 1.0);
-markPeak(fPlot, af2, '正向', 'b');
-markPeak(fPlot, ab2, '反向', 'r');
-grid on; box on;
-xlim([100, 600]); ylim([0, 1.05]);
-xlabel('Frequency (Hz)'); ylabel('Absorption');
-title('状态2：蓝实线=正向吸声（窄带），红虚线=反向吸声（宽带）');
-legend([hF, hB, hL], {'正向吸声', '反向吸声', '0.5'}, 'Location', 'northeast');
+fprintf('\n========== 传递矩阵最终结果 ==========\n');
+printReport(report, '最终');
+fprintf('孔径 d1 d2 d3 = %.4f  %.4f  %.4f mm\n', dMm(1), dMm(2), dMm(3));
+fprintf('状态1 实际高度 H1 H2 = %.4f  %.4f mm\n', H1mm(1), H1mm(2));
+fprintf('状态2 实际高度 H1 H2 = %.4f  %.4f mm\n', H2mm(1), H2mm(2));
+fprintf('能量误差 状态1 %.3e  状态2 %.3e\n', report.energy1, report.energy2);
 
 outDir = fileparts(mfilename('fullpath'));
 if isempty(outDir)
     outDir = pwd;
 end
+resultPath = fullfile(outDir, 'origami_two_state.mat');
 figPath = fullfile(outDir, 'origami_two_state.png');
-matPath = fullfile(outDir, 'origami_two_state.mat');
-print(fig, figPath, '-dpng', '-r140');
-save(matPath, 'fPlot', 'fTrain', 'dBest', 'hBest1', 'hBest2', ...
-    'af1', 'ab1', 'af2', 'ab2', 'bestPhys', 'forwardNet', 'xMean', 'xStd', 'maeF', 'maeB');
+save(resultPath, 'fPlot', 'fTrain', 'dMm', 'H1mm', 'H2mm', ...
+    'af1', 'ab1', 'af2', 'ab2', 'report', ...
+    'forwardNet', 'inverseNet', 'xMean', 'xStd', 'yMean', 'yStd');
+fprintf('参数已保存到 %s\n', resultPath);
+
+plotTwoStates(fPlot, af1, ab1, af2, ab2, report, figPath);
 fprintf('图已保存到 %s\n', figPath);
 end
 
-function air = airProps()
-air.rho0 = 1.29;
-air.c0 = 343;
-air.eta = 1.89e-5;
-air.kappa = 0.026;
-air.Cv = 712;
-air.gamma = 1.4;
-air.P0 = air.rho0 * air.c0 ^ 2 / air.gamma;
-air.Z0 = air.rho0 * air.c0;
-air.nu = air.eta / air.rho0;
-air.muBar = air.kappa / (air.rho0 * air.Cv);
+%% 常量与物理
+
+function const = makeConst()
+const.rho = 1.29;
+const.c0 = 343;
+const.eta = 1.89e-5;
+const.Z0 = const.rho * const.c0;
+const.t = 2e-3;
+const.W = 30e-3;
+const.L = 30e-3;
+const.a = 30;
+const.hc = 20;
+const.n0 = 3;
+const.beta = 45;
+const.Hmin = 0.5;
+const.Hmax = 54;
+const.dMin = 0.1;
+const.dMax = 8;
 end
 
-function geom = geomProps()
-geom.W = 30e-3;
-geom.L = 30e-3;
-geom.t = 2e-3;
-geom.a = 30;
-geom.hc = 20;
-geom.n0 = 3;
-geom.beta = 45;
-geom.stinsonN = 200;
+function verifyPhysics(const, fPlot)
+[Heq1, V1] = cavityVolume(54, const);
+[Heq2, V2] = cavityVolume(42, const);
+fprintf('自检 H=54 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V1, Heq1);
+fprintf('自检 H=42 mm -> V=%.4f mm^3，Heq=%.4f mm\n', V2, Heq2);
+if abs(V1 - 36730.3710) > 1e-2 || abs(Heq1 - 40.8115) > 1e-3
+    error('第一腔体积或等效高度与给定值不符。');
+end
+if abs(V2 - 23231.2003) > 1e-2 || abs(Heq2 - 25.8124) > 1e-3
+    error('第二腔体积或等效高度与给定值不符。');
 end
 
-function Heq = equivalentHeight(H)
-a = 30;
-hc = 20;
-n0 = 3;
-beta = 45;
-Hmm = H * 1e3;
-h = Hmm / n0;
-q = sqrt(max(hc ^ 2 - h .^ 2, 0));
-tb = tand(beta);
-V1 = a .* h .* q / 16;
-V2 = h .* (a - hc) .* q / (16 * tb);
-V3 = h .* q / 24 .* (hc / tb - q / 2);
-V = 8 * n0 .* (a ^ 2 .* h / 8 - V1 - V2 - V3);
-Heq = V / (30e-3 * 30e-3 * 1e6) * 1e-3;
+[af, ab, energyErr] = acousticBatch([2.75, 1.73, 0.42], [54, 42], 100, const);
+fprintf('自检 100 Hz 正向 %.8f 反向 %.8f 能量误差 %.3e\n', af, ab, energyErr);
+if abs(af - 0.07867460) > 1e-7 || abs(ab - 0.03191483) > 1e-7
+    error('100 Hz 吸声系数与 origami_cavity_mpp.csv 不符。');
+end
+if energyErr > 1e-8
+    error('样本点能量误差过大。');
 end
 
-function [kEff, zEff] = ductStinson(f, air, W, L, N)
-omega = 2 * pi * reshape(f, 1, []);
-nf = numel(omega);
-bn = (2 * (0:N) + 1) * pi / L;
-Sv = zeros(1, nf);
-St = zeros(1, nf);
-for m = 0:N
-    am = (2 * m + 1) * pi / W;
-    lambda2 = am ^ 2 + bn .^ 2;
-    wmn = 1 ./ (am ^ 2 * bn .^ 2);
-    num = wmn .* lambda2;
-    Sv = Sv + sum(num.' ./ (lambda2.' + 1i * omega / air.nu), 1);
-    St = St + sum(num.' ./ (lambda2.' + 1i * omega / air.muBar), 1);
+[afS, abS] = acousticBatch([2.75, 1.73, 0.42], [54, 42], fPlot, const);
+info = analyzeCurves(afS, abS, abS, afS, fPlot);
+if info.meanB1 < 0.45
+    fprintf('样本几何的正向宽带平均 %.3f，低于 0.45，只作自检。\n', info.meanB1);
+else
+    fprintf('样本几何在 %.0f–%.0f Hz 正向平均 %.3f，反向平均 %.3f。\n', ...
+        info.fLo1, info.fHi1, info.meanB1, info.meanO1);
 end
-factor = 64 / (W ^ 2 * L ^ 2);
-Fv = factor * Sv;
-Ft = factor * St;
-rhoEff = air.rho0 ./ (1 - Fv);
-kMod = air.gamma * air.P0 ./ (1 + (air.gamma - 1) * Ft);
-kEff = omega .* sqrt(rhoEff ./ kMod);
-zEff = sqrt(rhoEff .* kMod);
 end
 
-function [alphaF, alphaB] = origamiResponse(dFlat, hFlat, f, model)
-if size(dFlat, 1) == 1 && numel(dFlat) == 12
-    dFlat = reshape(dFlat, 1, 12);
-end
-if size(hFlat, 1) == 1 && numel(hFlat) == 8
-    hFlat = reshape(hFlat, 1, 8);
-end
-B = size(dFlat, 1);
-omega = 2 * pi * reshape(f, 1, []);
-Nf = numel(omega);
-D = diametersFromRow(dFlat);
-Hv = equivalentHeight(depthsFromRow(hFlat));
-phi = pi * (D .^ 2) / (4 * model.W * model.L);
-air = model.air;
-Zp = zeros(4, 3, B, Nf);
-for s = 1:4
-    for j = 1:3
-        d = reshape(D(s, j, :), B, 1);
-        ph = reshape(phi(s, j, :), B, 1);
-        y = (d / 2) ./ sqrt(air.eta ./ (air.rho0 * omega));
-        qv = y * sqrt(-1i);
-        F = 1 - 2 * besselj(1, qv) ./ (qv .* besselj(0, qv));
-        Z = 1i * air.rho0 * model.t * omega ./ (ph .* F) ...
-            + sqrt(2) * air.eta * y ./ (ph .* d) ...
-            + 1i * 0.85 * air.rho0 * d .* omega ./ ph;
-        Zp(s, j, :, :) = reshape(Z, 1, 1, B, Nf);
-    end
+function [Heq_mm, V] = cavityVolume(H_mm, const)
+h = H_mm ./ const.n0;
+q = sqrt(const.hc.^2 - h.^2);
+V1 = const.a .* h .* q / 16;
+V2 = h .* (const.a - const.hc) .* q / (16 * tand(const.beta));
+V3 = h .* q / 24 .* (const.hc / tand(const.beta) - q / 2);
+V = 8 * const.n0 .* (const.a.^2 .* h / 8 - V1 - V2 - V3);
+S = const.W * const.L * 1e6;
+Heq_mm = V ./ S;
 end
 
-Y11 = zeros(B, Nf);
-Y12 = zeros(B, Nf);
-Y21 = zeros(B, Nf);
-Y22 = zeros(B, Nf);
-kRow = reshape(model.kEff, 1, []);
-zRow = reshape(model.zEff, 1, []);
-for s = 1:4
-    Z1 = reshape(Zp(s, 1, :, :), B, Nf);
-    Z2 = reshape(Zp(s, 2, :, :), B, Nf);
-    Z3 = reshape(Zp(s, 3, :, :), B, Nf);
-    H1 = reshape(Hv(s, 1, :), B, 1);
-    H2 = reshape(Hv(s, 2, :), B, 1);
-    [A, Bm, C, Dm] = cellTransfer(Z1, Z2, Z3, H1, H2, kRow, zRow);
-    Y11 = Y11 + 0.25 * (Dm ./ Bm);
-    Y12 = Y12 + 0.25 * (C - A .* Dm ./ Bm);
-    Y21 = Y21 + 0.25 * (1 ./ Bm);
-    Y22 = Y22 + 0.25 * (-A ./ Bm);
+function [af, ab, energyErr] = acousticBatch(d_mm, H_mm, f, const)
+d_mm = reshapeBatch(d_mm, 3);
+H_mm = reshapeBatch(H_mm, 2);
+f = f(:).';
+d = d_mm * 1e-3;
+H = H_mm * 1e-3;
+omega = 2 * pi * f;
+k = omega / const.c0;
+B = size(d, 1);
+Nf = numel(f);
+Heq = [cavityVolume(H_mm(:, 1), const), cavityVolume(H_mm(:, 2), const)];
+Heq = Heq * 1e-3;
+phi = pi * (d.^2) / (4 * const.W * const.L);
+Z1 = plateImpedance(d(:, 1), phi(:, 1), omega, const);
+Z2 = plateImpedance(d(:, 2), phi(:, 2), omega, const);
+Z3 = plateImpedance(d(:, 3), phi(:, 3), omega, const);
+T11 = ones(B, Nf);
+T22 = ones(B, Nf);
+T12 = Z1;
+T21 = zeros(B, Nf);
+[T11, T12, T21, T22] = mulCavity(T11, T12, T21, T22, Heq(:, 1), k, const.Z0);
+[T11, T12, T21, T22] = mulPlate(T11, T12, T21, T22, Z2);
+[T11, T12, T21, T22] = mulCavity(T11, T12, T21, T22, Heq(:, 2), k, const.Z0);
+[T11, T12, T21, T22] = mulPlate(T11, T12, T21, T22, Z3);
+D = T11 + T12 / const.Z0 + T21 * const.Z0 + T22;
+Ltot = 3 * const.t + H(:, 1) + H(:, 2);
+tau = 2 * exp(1i * (Ltot * k)) ./ D;
+rf = (T11 + T12 / const.Z0 - T21 * const.Z0 - T22) ./ D;
+rb = (-T11 + T12 / const.Z0 - T21 * const.Z0 + T22) ./ D;
+Rf = abs(rf).^2;
+Rb = abs(rb).^2;
+Tr = abs(tau).^2;
+af = 1 - Rf - Tr;
+ab = 1 - Rb - Tr;
+good = isfinite(af) & isfinite(ab) & isfinite(Rf) & isfinite(Rb) & isfinite(Tr);
+if any(good(:))
+    e1 = abs(af + Rf + Tr - 1);
+    e2 = abs(ab + Rb + Tr - 1);
+    energyErr = max(max(e1(good)), max(e2(good)));
+else
+    energyErr = inf;
 end
-A = -Y22 ./ Y21;
-Bm = 1 ./ Y21;
-C = Y12 - Y11 .* Y22 ./ Y21;
-Dm = Y11 ./ Y21;
-Z0 = air.Z0;
-den = A + Bm / Z0 + C * Z0 + Dm;
-tau = 2 ./ den;
-rf = (A + Bm / Z0 - C * Z0 - Dm) ./ den;
-rb = (-A + Bm / Z0 - C * Z0 + Dm) ./ den;
-alphaF = 1 - abs(rf) .^ 2 - abs(tau) .^ 2;
-alphaB = 1 - abs(rb) .^ 2 - abs(tau) .^ 2;
-end
-
-function [A, Bm, C, Dm] = cellTransfer(Z1, Z2, Z3, H1, H2, kRow, zRow)
-M = plate(Z1);
-M = mulCell(M, cavity(H1, kRow, zRow));
-M = mulCell(M, plate(Z2));
-M = mulCell(M, cavity(H2, kRow, zRow));
-M = mulCell(M, plate(Z3));
-A = M{1};
-Bm = M{2};
-C = M{3};
-Dm = M{4};
-end
-
-function M = plate(Z)
-M = {ones(size(Z)), Z, zeros(size(Z)), ones(size(Z))};
-end
-
-function M = cavity(H, kRow, zRow)
-kh = H .* kRow;
-ck = cos(kh);
-sk = sin(kh);
-M = {ck, 1i * zRow .* sk, 1i * sk ./ zRow, ck};
+af(~isfinite(af)) = 0;
+ab(~isfinite(ab)) = 0;
 end
 
-function M = mulCell(A, B)
-A11 = A{1}; A12 = A{2}; A21 = A{3}; A22 = A{4};
-B11 = B{1}; B12 = B{2}; B21 = B{3}; B22 = B{4};
-M = { ...
-    A11 .* B11 + A12 .* B21, ...
-    A11 .* B12 + A12 .* B22, ...
-    A21 .* B11 + A22 .* B21, ...
-    A21 .* B12 + A22 .* B22};
+function M = reshapeBatch(M, nCol)
+if isvector(M) && numel(M) == nCol
+    M = reshape(M, 1, nCol);
+end
 end
 
-function D = diametersFromRow(v)
-B = size(v, 1);
-tmp = reshape(v.', 3, 4, B);
-D = permute(tmp, [2, 1, 3]);
+function Z = plateImpedance(d, phi, omega, const)
+y = (d / 2) ./ sqrt(const.eta ./ (const.rho * omega));
+q = y * sqrt(-1i);
+invF = (1 - 2 * besselj(1, q) ./ (q .* besselj(0, q))).^(-1);
+Z = 1i .* omega .* const.rho .* const.t ./ phi .* invF ...
+    + sqrt(2) * const.eta .* y ./ (phi .* d) ...
+    + 1i * 0.85 .* omega .* const.rho .* d ./ phi;
+Z = reshape(Z, numel(d), numel(omega));
 end
 
-function H = depthsFromRow(v)
-B = size(v, 1);
-tmp = reshape(v.', 2, 4, B);
-H = permute(tmp, [2, 1, 3]);
+function [C11, C12, C21, C22] = mulPlate(A11, A12, A21, A22, Z)
+C11 = A11;
+C21 = A21;
+C12 = A11 .* Z + A12;
+C22 = A21 .* Z + A22;
 end
 
-function [X, Y] = generateDataset(nSamples, f, model, dLower, dUpper, hLower, hUpper, chunk)
+function [C11, C12, C21, C22] = mulCavity(A11, A12, A21, A22, Heq, k, Z0)
+kh = Heq .* k;
+c = cos(kh);
+s = sin(kh);
+B11 = c;
+B22 = c;
+B12 = 1i * Z0 .* s;
+B21 = 1i * s ./ Z0;
+C11 = A11 .* B11 + A12 .* B21;
+C12 = A11 .* B12 + A12 .* B22;
+C21 = A21 .* B11 + A22 .* B21;
+C22 = A21 .* B12 + A22 .* B22;
+end
+
+%% 数据集
+
+function [X, Y] = buildDataset(nBase, nPert, maxHot, f, const)
+[X, Y] = sampleUniform(nBase, f, const);
+peak = max(Y, [], 2);
+hot = find(peak >= 0.72);
+if numel(hot) < 30
+    hot = find(peak >= 0.45);
+end
+if isempty(hot)
+    return;
+end
+if numel(hot) > maxHot
+    hot = hot(randperm(numel(hot), maxHot));
+end
+sig = [0.15, 0.10, 0.15, 2.5, 2.5];
+nH = numel(hot);
+Xp = zeros(nH * nPert, 5);
+for i = 1:nPert
+    rows = (i - 1) * nH + (1:nH);
+    Xp(rows, :) = X(hot, :) + randn(nH, 5) .* sig;
+end
+lo = [const.dMin, const.dMin, const.dMin, const.Hmin, const.Hmin];
+hi = [const.dMax, const.dMax, const.dMax, const.Hmax, const.Hmax];
+Xp = min(max(Xp, lo), hi);
+[af, ab] = acousticChunk(Xp(:, 1:3), Xp(:, 4:5), f, const, 4000);
+Yp = [af, ab];
+good = all(isfinite(Yp), 2);
+X = [X; Xp(good, :)];
+Y = [Y; Yp(good, :)];
+fprintf('  高峰附近追加 %d 组。\n', sum(good));
+end
+
+function [X, Y] = sampleUniform(n, f, const)
+d = const.dMin + (const.dMax - const.dMin) * rand(n, 3);
+H = const.Hmin + (const.Hmax - const.Hmin) * rand(n, 2);
+[af, ab] = acousticChunk(d, H, f, const, 4000);
+X = [d, H];
+Y = [af, ab];
+good = all(isfinite(Y), 2);
+X = X(good, :);
+Y = Y(good, :);
+end
+
+function [af, ab] = acousticChunk(d, H, f, const, chunk)
+n = size(d, 1);
 nf = numel(f);
-X = zeros(nSamples, 20);
-Y = zeros(nSamples, 2 * nf);
-filled = 0;
-while filled < nSamples
-    draw = min(chunk, nSamples - filled);
-    dTry = dLower + (dUpper - dLower) .* rand(draw, 12);
-    hTry = hLower + (hUpper - hLower) .* rand(draw, 8);
-    [af, ab] = origamiResponse(dTry, hTry, f, model);
-    ok = all(isfinite(af), 2) & all(isfinite(ab), 2) ...
-        & all(af > -0.05 & af < 1.05, 2) & all(ab > -0.05 & ab < 1.05, 2);
-    keep = find(ok);
-    take = min(numel(keep), nSamples - filled);
-    if take == 0
-        error('这一批样本的吸声系数都不是有限值。');
-    end
-    rows = filled + (1:take);
-    X(rows, 1:12) = dTry(keep(1:take), :);
-    X(rows, 13:20) = hTry(keep(1:take), :);
-    Y(rows, 1:nf) = af(keep(1:take), :);
-    Y(rows, nf + (1:nf)) = ab(keep(1:take), :);
-    filled = filled + take;
-    fprintf('  已接受 %d / %d\n', filled, nSamples);
+af = zeros(n, nf);
+ab = zeros(n, nf);
+for s = 1:chunk:n
+    e = min(s + chunk - 1, n);
+    [af(s:e, :), ab(s:e, :)] = acousticBatch(d(s:e, :), H(s:e, :), f, const);
 end
 end
+
+function [Xn, Yn] = resonantCloud(centers7, f, const, quick)
+lo5 = [const.dMin, const.dMin, const.dMin, const.Hmin, const.Hmin];
+hi5 = [const.dMax, const.dMax, const.dMax, const.Hmax, const.Hmax];
+base = [centers7(:, 1:5); [centers7(:, 1:3), centers7(:, 6:7)]];
+base = dedupe(base, 0.15);
+nPer = 12;
+nUni = 2500;
+if quick
+    nPer = 2;
+    nUni = 80;
+end
+sigW = [0.28, 0.16, 0.28, 4.5, 4.5];
+sigT = [0.08, 0.05, 0.08, 1.4, 1.4];
+nB = size(base, 1);
+Xw = repmat(base, nPer, 1) + randn(nB * nPer, 5) .* sigW;
+Xt = repmat(base, nPer, 1) + randn(nB * nPer, 5) .* sigT;
+Xu = lo5 + (hi5 - lo5) .* rand(nUni, 5);
+Xn = min(max([Xw; Xt; Xu], lo5), hi5);
+[af, ab] = acousticChunk(Xn(:, 1:3), Xn(:, 4:5), f, const, 4000);
+Yn = [af, ab];
+good = all(isfinite(Yn), 2);
+Xn = Xn(good, :);
+Yn = Yn(good, :);
+fprintf('  续训样本 %d 组。\n', size(Xn, 1));
+end
+
+%% 网络
 
 function net = initMLP(sizes, acts)
 net.W = cell(1, numel(sizes) - 1);
@@ -387,8 +440,8 @@ end
 end
 
 function Y = mlpPredict(net, X)
-Z = mlpForward(net, X.');
-Y = Z.y.';
+cache = mlpForward(net, X.');
+Y = cache.y.';
 end
 
 function cache = mlpForward(net, X)
@@ -438,164 +491,621 @@ epsilon = 1e-8;
 adam.t = adam.t + 1;
 for k = 1:numel(net.W)
     adam.mW{k} = beta1 * adam.mW{k} + (1 - beta1) * grads.W{k};
-    adam.vW{k} = beta2 * adam.vW{k} + (1 - beta2) * (grads.W{k} .^ 2);
+    adam.vW{k} = beta2 * adam.vW{k} + (1 - beta2) * (grads.W{k}.^2);
     adam.mb{k} = beta1 * adam.mb{k} + (1 - beta1) * grads.b{k};
-    adam.vb{k} = beta2 * adam.vb{k} + (1 - beta2) * (grads.b{k} .^ 2);
-    mW = adam.mW{k} / (1 - beta1 ^ adam.t);
-    vW = adam.vW{k} / (1 - beta2 ^ adam.t);
-    mb = adam.mb{k} / (1 - beta1 ^ adam.t);
-    vb = adam.vb{k} / (1 - beta2 ^ adam.t);
+    adam.vb{k} = beta2 * adam.vb{k} + (1 - beta2) * (grads.b{k}.^2);
+    mW = adam.mW{k} / (1 - beta1^adam.t);
+    vW = adam.vW{k} / (1 - beta2^adam.t);
+    mb = adam.mb{k} / (1 - beta1^adam.t);
+    vb = adam.vb{k} / (1 - beta2^adam.t);
     net.W{k} = net.W{k} - learnRate * mW ./ (sqrt(vW) + epsilon);
     net.b{k} = net.b{k} - learnRate * mb ./ (sqrt(vb) + epsilon);
 end
 end
 
-function net = trainRegressor(net, X, Y, XVal, YVal, epochs, batchSize, learnRate)
+function net = trainRegressor(net, X, Y, XVal, YVal, epochs, minEpoch, batchSize, learnRate, name)
 adam = initAdam(net);
 n = size(X, 1);
+useBatch = min(batchSize, n);
+bestMae = inf;
+bestNet = net;
+stall = 0;
+for epoch = 1:epochs
+    order = randperm(n);
+    total = 0;
+    seen = 0;
+    for s = 1:useBatch:n
+        batch = order(s:min(s + useBatch - 1, n));
+        cache = mlpForward(net, X(batch, :).');
+        residual = cache.y - Y(batch, :).';
+        total = total + sum(residual(:).^2);
+        seen = seen + numel(residual);
+        grads = mlpBackward(net, cache, 2 * residual / numel(residual));
+        [net, adam] = adamApply(net, adam, grads, learnRate);
+    end
+    pred = mlpPredict(net, XVal);
+    mae = mean(abs(pred(:) - YVal(:)));
+    fprintf('%s epoch %02d  train_mse=%.6e  val_mae=%.6e\n', ...
+        name, epoch, total / max(seen, 1), mae);
+    flushOut();
+    if mae + 1e-5 < bestMae
+        bestMae = mae;
+        bestNet = copyNet(net);
+        stall = 0;
+    else
+        stall = stall + 1;
+    end
+    if epoch >= minEpoch && stall >= 8
+        fprintf('%s 验证误差停住，采用第 %d 轮之前的最优权重。\n', name, epoch);
+        break;
+    end
+end
+net = bestNet;
+end
+
+function inverseNet = trainAutoencoder(inverseNet, forwardNet, SStd, SRaw, ...
+    SValStd, SValRaw, epochs, batchSize, learnRate)
+adam = initAdam(inverseNet);
+n = size(SStd, 1);
 useBatch = min(batchSize, n);
 for epoch = 1:epochs
     order = randperm(n);
     total = 0;
     seen = 0;
-    for start = 1:useBatch:n
-        batch = order(start:min(start + useBatch - 1, n));
-        cache = mlpForward(net, X(batch, :).');
-        residual = cache.y - Y(batch, :).';
-        total = total + sum(residual(:) .^ 2);
+    for s = 1:useBatch:n
+        batch = order(s:min(s + useBatch - 1, n));
+        invCache = mlpForward(inverseNet, SStd(batch, :).');
+        fwdCache = mlpForward(forwardNet, invCache.y);
+        residual = fwdCache.y - SRaw(batch, :).';
+        total = total + sum(residual(:).^2);
         seen = seen + numel(residual);
-        grads = mlpBackward(net, cache, 2 * residual / numel(residual));
-        [net, adam] = adamApply(net, adam, grads, learnRate);
+        dParam = backwardToInput(forwardNet, fwdCache, 2 * residual / numel(residual));
+        grads = mlpBackward(inverseNet, invCache, dParam);
+        [inverseNet, adam] = adamApply(inverseNet, adam, grads, learnRate);
     end
-    valPred = mlpPredict(net, XVal);
-    valMse = mean((valPred(:) - YVal(:)) .^ 2);
-    fprintf('正向网络 epoch %02d  train_mse=%.6e  val_mse=%.6e\n', epoch, total / seen, valMse);
+    pred = mlpPredict(inverseNet, SValStd);
+    recon = mlpPredict(forwardNet, pred);
+    valMse = mean((recon(:) - SValRaw(:)).^2);
+    fprintf('逆向网络 epoch %02d  train_mse=%.6e  val_mse=%.6e\n', ...
+        epoch, total / max(seen, 1), valMse);
+    flushOut();
 end
 end
 
-function xBest = shapeSearch(net, xMean, xStd, f, dLower, dUpper, hLower, hUpper, population, generations)
-lower = [dLower, hLower, hLower];
-upper = [dUpper, hUpper, hUpper];
-nVar = numel(lower);
-pop = lower + (upper - lower) .* rand(population, nVar);
-bestX = pop(1, :);
-bestLoss = inf;
-for gen = 1:generations
-    loss = zeros(population, 1);
-    for i = 1:population
-        loss(i) = netLoss(net, pop(i, :), xMean, xStd, f);
+function dX = backwardToInput(net, cache, dY)
+g = dY;
+for k = numel(net.W):-1:1
+    if strcmp(net.act{k}, 'relu')
+        g = g .* (cache.z{k} > 0);
     end
-    [loss, order] = sort(loss);
-    pop = pop(order, :);
-    if loss(1) < bestLoss
-        bestLoss = loss(1);
-        bestX = pop(1, :);
-    end
-    nextPop = pop(1:min(2, population), :);
-    while size(nextPop, 1) < population
-        pool = max(2, ceil(population / 3));
-        p1 = pop(randi(pool), :);
-        p2 = pop(randi(pool), :);
-        child = rand * p1 + (1 - rand) * p2;
-        span = upper - lower;
-        mutate = rand(1, nVar) < 0.25;
-        child(mutate) = child(mutate) + 0.10 * span(mutate) .* randn(1, sum(mutate));
-        child = min(max(child, lower), upper);
-        nextPop = [nextPop; child]; %#ok<AGROW>
-    end
-    pop = nextPop(1:population, :);
+    g = net.W{k}.' * g;
 end
-xBest = bestX;
+dX = g;
 end
 
-function loss = netLoss(net, x, xMean, xStd, f)
-y1 = predictState(net, x(1:12), x(13:20), xMean, xStd);
-y2 = predictState(net, x(1:12), x(21:28), xMean, xStd);
+function checkNetworkGradient()
+net = initMLP([3, 5, 2], {'relu', 'linear'});
+X = randn(3, 4);
+cache = mlpForward(net, X);
+dY = randn(size(cache.y));
+grads = mlpBackward(net, cache, dY);
+delta = 1e-6;
+numeric = zeros(size(net.W{1}));
+for row = 1:size(net.W{1}, 1)
+    for col = 1:size(net.W{1}, 2)
+        net.W{1}(row, col) = net.W{1}(row, col) + delta;
+        yp = mlpForward(net, X);
+        net.W{1}(row, col) = net.W{1}(row, col) - 2 * delta;
+        ym = mlpForward(net, X);
+        net.W{1}(row, col) = net.W{1}(row, col) + delta;
+        numeric(row, col) = sum(dY(:) .* (yp.y(:) - ym.y(:))) / (2 * delta);
+    end
+end
+err = max(abs(numeric(:) - grads.W{1}(:)));
+dX = backwardToInput(net, cache, dY);
+Xp = X;
+Xp(1, 1) = Xp(1, 1) + delta;
+yp = mlpForward(net, Xp);
+Xm = X;
+Xm(1, 1) = Xm(1, 1) - delta;
+ym = mlpForward(net, Xm);
+numIn = sum(dY(:) .* (yp.y(:) - ym.y(:))) / (2 * delta);
+err = max(err, abs(numIn - dX(1, 1)));
+if err > 1e-5
+    error('网络反向传播自检失败，误差 %.3e', err);
+end
+fprintf('网络反向传播自检通过，最大误差 %.3e\n', err);
+end
+
+function out = copyNet(net)
+out.act = net.act;
+out.W = cell(size(net.W));
+out.b = cell(size(net.b));
+for k = 1:numel(net.W)
+    out.W{k} = net.W{k};
+    out.b{k} = net.b{k};
+end
+end
+
+%% 搜索
+
+function seeds = inverseSeeds(inverseNet, f, yMean, yStd, xMean, xStd, lo, hi)
+broadLos = [140, 220, 300, 380];
+peakHzs = [180, 260, 360, 470, 540];
+seeds = zeros(0, 7);
+for ib = 1:numel(broadLos)
+    for ip = 1:numel(peakHzs)
+        if abs(peakHzs(ip) - (broadLos(ib) + 100)) < 70
+            continue;
+        end
+        tForward = shapeTarget(f, true, broadLos(ib), peakHzs(ip));
+        tBackward = shapeTarget(f, false, broadLos(ib), max(140, peakHzs(ip) - 160));
+        p1 = decodeTarget(inverseNet, tForward, yMean, yStd, xMean, xStd);
+        p2 = decodeTarget(inverseNet, tBackward, yMean, yStd, xMean, xStd);
+        d = 0.5 * (p1(1:3) + p2(1:3));
+        row = [d, p1(4:5), p2(4:5)];
+        row = min(max(row, lo), hi);
+        seeds = [seeds; row]; %#ok<AGROW>
+    end
+end
+if size(seeds, 1) > 12
+    seeds = seeds(1:12, :);
+end
+end
+
+function s = shapeTarget(f, forwardIsBroad, broadLo, peakHz)
+af = 0.12 * ones(size(f));
+ab = 0.12 * ones(size(f));
+band = f >= broadLo & f <= broadLo + 200;
+peak = 0.92 * exp(-0.5 * ((f - peakHz) / 16).^2);
+if forwardIsBroad
+    af(band) = 0.70;
+    ab = max(ab, peak);
+else
+    ab(band) = 0.70;
+    af = max(af, peak);
+end
+s = [af, ab];
+end
+
+function x = decodeTarget(inverseNet, target, yMean, yStd, xMean, xStd)
+z = mlpPredict(inverseNet, (target - yMean) ./ yStd);
+x = z .* xStd + xMean;
+end
+
+function pool = proposePool(net, xMean, xStd, f, seeds, lo, hi, nRestart, nPop, nGen, nRandom)
+pool = seeds;
+chunk = 4000;
+keepEach = 60;
+if nRandom < chunk
+    chunk = nRandom;
+    keepEach = max(20, round(nRandom / 4));
+end
+bag = zeros(0, 7);
+bagL = zeros(0, 1);
+fprintf('网络随机筛选 %d 个几何...\n', nRandom);
+for s = 1:chunk:nRandom
+    n = min(chunk, nRandom - s + 1);
+    X = lo + (hi - lo) .* rand(n, 7);
+    L = populationLoss(net, xMean, xStd, X, f);
+    [Ls, order] = sort(L);
+    k = min(keepEach, n);
+    bag = [bag; X(order(1:k), :)]; %#ok<AGROW>
+    bagL = [bagL; Ls(1:k)]; %#ok<AGROW>
+end
+[~, order] = sort(bagL);
+nKeep = min(400, numel(order));
+pool = [pool; bag(order(1:nKeep), :)]; %#ok<AGROW>
+fprintf('  随机筛选最优网络损失 %.4f\n', bagL(order(1)));
+
+bestX = [];
+bestL = inf;
+for r = 1:nRestart
+    pop = lo + (hi - lo) .* rand(nPop, 7);
+    nSeed = min(size(seeds, 1), max(1, floor(nPop / 5)));
+    pop(1:nSeed, :) = seeds(randperm(size(seeds, 1), nSeed), :);
+    if ~isempty(bestX)
+        pop(2, :) = bestX;
+    end
+    for g = 1:nGen
+        L = populationLoss(net, xMean, xStd, pop, f);
+        [Ls, order] = sort(L);
+        pop = pop(order, :);
+        kTop = min(6, nPop);
+        pool = [pool; pop(1:kTop, :)]; %#ok<AGROW>
+        if Ls(1) < bestL
+            bestL = Ls(1);
+            bestX = pop(1, :);
+        end
+        if g == nGen || mod(g, 7) == 0
+            fprintf('  重启 %d  第 %02d 代  网络损失 %.4f\n', r, g, Ls(1));
+            flushOut();
+        end
+        pop = reproduce(pop, nPop, lo, hi);
+    end
+end
+pool = dedupe(min(max(pool, lo), hi), 0.04);
+fprintf('去重后候选 %d 个。网络最优损失 %.4f\n', size(pool, 1), bestL);
+end
+
+function L = populationLoss(net, xMean, xStd, pop, f)
+y1 = mlpPredict(net, ([pop(:, 1:3), pop(:, 4:5)] - xMean) ./ xStd);
+y2 = mlpPredict(net, ([pop(:, 1:3), pop(:, 6:7)] - xMean) ./ xStd);
 nf = numel(f);
-loss = curveLoss(f, y1(1:nf), y1(nf + 1:end), y2(1:nf), y2(nf + 1:end));
+af1 = min(max(y1(:, 1:nf), 0), 1);
+ab1 = min(max(y1(:, nf + 1:end), 0), 1);
+af2 = min(max(y2(:, 1:nf), 0), 1);
+ab2 = min(max(y2(:, nf + 1:end), 0), 1);
+L = batchShapeLoss(af1, ab1, af2, ab2, f);
 end
 
-function y = predictState(net, d, h, xMean, xStd)
-y = mlpPredict(net, ([d, h] - xMean) ./ xStd);
+function pop = reproduce(popSorted, nPop, lo, hi)
+nElite = min(4, size(popSorted, 1));
+elites = popSorted(1:nElite, :);
+nVar = numel(lo);
+nKids = nPop - nElite;
+parentPool = max(nElite, ceil(size(popSorted, 1) / 3));
+i1 = randi(parentPool, nKids, 1);
+i2 = randi(parentPool, nKids, 1);
+mix = rand(nKids, nVar);
+kids = mix .* popSorted(i1, :) + (1 - mix) .* popSorted(i2, :);
+span = hi - lo;
+mut = rand(nKids, nVar) < 0.28;
+kids = kids + mut .* (0.12 .* span .* randn(nKids, nVar));
+jump = rand(nKids, 1) < 0.15;
+if any(jump)
+    kids(jump, 4:7) = kids(jump, 4:7) + randn(sum(jump), 4) .* (0.18 .* span(4:7));
+end
+kids = min(max(kids, lo), hi);
+pop = [elites; kids];
 end
 
-function loss = curveLoss(f, af1, ab1, af2, ab2)
-[loss1, f1] = shapeGap(f, af1, ab1, true);
-[loss2, f2] = shapeGap(f, af2, ab2, false);
-loss = loss1 + loss2 + (max(0, 100 - abs(f1 - f2)) / 100) ^ 2;
+function L = batchShapeLoss(af1, ab1, af2, ab2, f)
+[mb1, mo1] = pickWindow(af1, ab1, f);
+[mb2, mo2] = pickWindow(ab2, af2, f);
+[h1, f1, w1] = batchGlobalPeak(ab1, f);
+[h2, f2, w2] = batchGlobalPeak(af2, f);
+shift = abs(f1 - f2);
+L = 20 * (max(0, 0.45 - mb1).^2 + max(0, 0.20 - (mb1 - mo1)).^2 ...
+    + max(0, 0.45 - mb2).^2 + max(0, 0.20 - (mb2 - mo2)).^2 ...
+    + max(0, 0.80 - h1).^2 + max(0, (w1 - 80) / 80).^2 ...
+    + max(0, 0.80 - h2).^2 + max(0, (w2 - 80) / 80).^2 ...
+    + (max(0, 100 - shift) / 100).^2) ...
+    - 0.04 * (mb1 + mb2) - 0.015 * ((mb1 - mo1) + (mb2 - mo2)) - 0.01 * (h1 + h2);
 end
 
-function [loss, fNarrow] = shapeGap(f, af, ab, forwardIsBroad)
-if forwardIsBroad
-    aBroad = af;
-    aNarrow = ab;
-else
-    aBroad = ab;
-    aNarrow = af;
-end
-[meanBroad, meanOther] = bestWindow(f, aBroad, aNarrow);
-[widthNarrow, peakNarrow, fNarrow] = absorptionWidth(f, aNarrow);
-loss = max(0, 0.20 - (meanBroad - meanOther)) ^ 2 ...
-    + max(0, 0.45 - meanBroad) ^ 2 ...
-    + (max(0, widthNarrow - 80) / 80) ^ 2 ...
-    + max(0, 0.80 - peakNarrow) ^ 2;
-end
-
-function [meanBroad, meanOther, fLo, fHi] = bestWindow(f, aBroad, aOther)
+function [mb, mo] = pickWindow(broad, other, f)
 df = mean(diff(f));
-nWin = min(numel(f), max(2, round(200 / df)));
-best = -inf;
-meanBroad = 0;
-meanOther = 0;
-iBest = 1;
-for i = 1:(numel(f) - nWin + 1)
-    mb = mean(aBroad(i:i + nWin - 1));
-    mo = mean(aOther(i:i + nWin - 1));
-    if mb - mo > best
-        best = mb - mo;
-        meanBroad = mb;
-        meanOther = mo;
-        iBest = i;
-    end
-end
-fLo = f(iBest);
-fHi = f(iBest + nWin - 1);
+nWin = max(2, round(200 / df));
+nWin = min(nWin, size(broad, 2));
+cB = [zeros(size(broad, 1), 1), cumsum(broad, 2)];
+cO = [zeros(size(other, 1), 1), cumsum(other, 2)];
+nOut = size(broad, 2) - nWin + 1;
+meanB = (cB(:, nWin + 1:end) - cB(:, 1:nOut)) / nWin;
+meanO = (cO(:, nWin + 1:end) - cO(:, 1:nOut)) / nWin;
+margin = min(meanB - 0.45, (meanB - meanO) - 0.20);
+[~, idx] = max(margin, [], 2);
+rows = (1:size(broad, 1)).';
+mb = meanB(sub2ind(size(meanB), rows, idx));
+mo = meanO(sub2ind(size(meanO), rows, idx));
 end
 
-function [widthHz, peak, fPeak] = absorptionWidth(f, a)
+function [height, freq, width] = batchGlobalPeak(a, f)
+[height, idx] = max(a, [], 2);
 df = mean(diff(f));
+N = size(a, 2);
+B = size(a, 1);
+width = zeros(B, 1);
 above = a >= 0.5;
-best = 0;
-run = 0;
-for i = 1:numel(above)
-    if above(i)
-        run = run + 1;
-        best = max(best, run);
+for b = 1:B
+    i = idx(b);
+    if height(b) < 0.5
+        width(b) = 0;
     else
-        run = 0;
+        lo = i;
+        hi = i;
+        while lo > 1 && above(b, lo - 1)
+            lo = lo - 1;
+        end
+        while hi < N && above(b, hi + 1)
+            hi = hi + 1;
+        end
+        width(b) = (hi - lo + 1) * df;
     end
 end
-widthHz = best * df;
-[peak, iPeak] = max(a);
-fPeak = f(iPeak);
+freq = f(idx);
+freq = freq(:);
+height = height(:);
 end
 
-function reportShape(name, f, af, ab, forwardIsBroad)
-if forwardIsBroad
-    aBroad = af; aNarrow = ab; broadName = '正向'; narrowName = '反向';
+function scored = rankByPhysics(pool, f, const)
+n = size(pool, 1);
+af = zeros(n, numel(f));
+ab = zeros(n, numel(f));
+af2 = zeros(n, numel(f));
+ab2 = zeros(n, numel(f));
+chunk = 300;
+for s = 1:chunk:n
+    e = min(s + chunk - 1, n);
+    d = pool(s:e, 1:3);
+    [af(s:e, :), ab(s:e, :)] = acousticBatch(d, pool(s:e, 4:5), f, const);
+    [af2(s:e, :), ab2(s:e, :)] = acousticBatch(d, pool(s:e, 6:7), f, const);
+end
+loss = inf(n, 1);
+ok = false(n, 1);
+infos = cell(n, 1);
+for i = 1:n
+    infos{i} = analyzeCurves(af(i, :), ab(i, :), af2(i, :), ab2(i, :), f);
+    loss(i) = infos{i}.loss;
+    ok(i) = infos{i}.allOk;
+end
+if any(ok)
+    idx = find(ok);
+    [~, j] = min(loss(idx));
+    best = idx(j);
 else
-    aBroad = ab; aNarrow = af; broadName = '反向'; narrowName = '正向';
+    [~, best] = min(loss);
 end
-[meanBroad, meanOther, fLo, fHi] = bestWindow(f, aBroad, aNarrow);
-[widthNarrow, peakNarrow, fNarrow] = absorptionWidth(f, aNarrow);
-fprintf(['%s：%s 在 %.0f–%.0f Hz 平均 %.3f，比另一方向高 %.3f；' ...
-    '%s 峰 %.2f @ %.0f Hz，连续超过 0.5 的宽度 %.0f Hz\n'], ...
-    name, broadName, fLo, fHi, meanBroad, meanBroad - meanOther, ...
-    narrowName, peakNarrow, fNarrow, widthNarrow);
+[~, order] = sort(loss);
+nCenter = min(12, n);
+centers = dedupe(pool(order(1:nCenter), :), 0.2);
+if size(centers, 1) < 4
+    centers = pool(order(1:min(8, n)), :);
+end
+scored.report = infos{best};
+scored.dMm = pool(best, 1:3);
+scored.H1mm = pool(best, 4:5);
+scored.H2mm = pool(best, 6:7);
+scored.af1 = af(best, :);
+scored.ab1 = ab(best, :);
+scored.af2 = af2(best, :);
+scored.ab2 = ab2(best, :);
+scored.centers = centers;
+scored.loss = loss(best);
+scored.nFeasible = sum(ok);
+fprintf('达标候选 %d / %d，选中损失 %.4f\n', sum(ok), n, loss(best));
 end
 
-function markPeak(f, a, label, color)
-[pk, ix] = max(a);
-text(f(ix), min(pk + 0.04, 1.02), label, 'Color', color, ...
-    'HorizontalAlignment', 'center', 'FontSize', 11);
+function yes = betterDesign(a, b)
+if a.report.allOk && ~b.report.allOk
+    yes = true;
+elseif ~a.report.allOk && b.report.allOk
+    yes = false;
+else
+    yes = a.loss < b.loss;
+end
+end
+
+function info = analyzeCurves(af1, ab1, af2, ab2, f)
+af1 = af1(:).';
+ab1 = ab1(:).';
+af2 = af2(:).';
+ab2 = ab2(:).';
+[info.fLo1, info.fHi1, info.meanB1, info.meanO1] = bestWindow(f, af1, ab1);
+[info.fLo2, info.fHi2, info.meanB2, info.meanO2] = bestWindow(f, ab2, af2);
+info.gap1 = info.meanB1 - info.meanO1;
+info.gap2 = info.meanB2 - info.meanO2;
+p1 = localPeaks(ab1, f);
+p2 = localPeaks(af2, f);
+pk = choosePeakPair(p1, p2);
+info.h1 = pk(1);
+info.fp1 = pk(2);
+info.w1 = pk(3);
+info.h2 = pk(4);
+info.fp2 = pk(5);
+info.w2 = pk(6);
+info.shift = abs(info.fp1 - info.fp2);
+info.okBroad1 = info.meanB1 >= 0.45 && info.gap1 >= 0.20;
+info.okNarrow1 = info.h1 >= 0.80 && info.w1 <= 80;
+info.ok1 = info.okBroad1 && info.okNarrow1;
+info.okBroad2 = info.meanB2 >= 0.45 && info.gap2 >= 0.20;
+info.okNarrow2 = info.h2 >= 0.80 && info.w2 <= 80;
+info.ok2 = info.okBroad2 && info.okNarrow2;
+info.okShift = info.shift >= 100;
+info.allOk = info.ok1 && info.ok2 && info.okShift;
+info.loss = 20 * (max(0, 0.45 - info.meanB1)^2 + max(0, 0.20 - info.gap1)^2 ...
+    + max(0, 0.45 - info.meanB2)^2 + max(0, 0.20 - info.gap2)^2 ...
+    + max(0, 0.80 - info.h1)^2 + max(0, (info.w1 - 80) / 80)^2 ...
+    + max(0, 0.80 - info.h2)^2 + max(0, (info.w2 - 80) / 80)^2 ...
+    + (max(0, 100 - info.shift) / 100)^2) ...
+    - 0.04 * (info.meanB1 + info.meanB2) ...
+    - 0.015 * (info.gap1 + info.gap2) ...
+    - 0.01 * (info.h1 + info.h2) ...
+    + 0.0004 * (info.w1 + info.w2);
+info.energy1 = nan;
+info.energy2 = nan;
+end
+
+function [fLo, fHi, meanB, meanO] = bestWindow(f, broad, other)
+df = mean(diff(f));
+nWin = max(2, round(200 / df));
+nWin = min(nWin, numel(f));
+cB = [0, cumsum(broad(:).')];
+cO = [0, cumsum(other(:).')];
+nOut = numel(f) - nWin + 1;
+mb = (cB(1 + nWin:end) - cB(1:nOut)) / nWin;
+mo = (cO(1 + nWin:end) - cO(1:nOut)) / nWin;
+margin = min(mb - 0.45, (mb - mo) - 0.20);
+[~, i] = max(margin);
+fLo = f(i);
+fHi = f(i + nWin - 1);
+meanB = mb(i);
+meanO = mo(i);
+end
+
+function peaks = localPeaks(a, f)
+a = a(:).';
+f = f(:).';
+N = numel(a);
+df = mean(diff(f));
+peaks = zeros(0, 3);
+for i = 1:N
+    if i > 1 && a(i) < a(i - 1)
+        continue;
+    end
+    if i < N && a(i) < a(i + 1)
+        continue;
+    end
+    if i < N && a(i) == a(i + 1)
+        continue;
+    end
+    j = i;
+    while j > 1 && a(j - 1) == a(i)
+        j = j - 1;
+    end
+    iPeak = round((j + i) / 2);
+    if a(iPeak) >= 0.5
+        lo = iPeak;
+        hi = iPeak;
+        while lo > 1 && a(lo - 1) >= 0.5
+            lo = lo - 1;
+        end
+        while hi < N && a(hi + 1) >= 0.5
+            hi = hi + 1;
+        end
+        width = (hi - lo + 1) * df;
+    else
+        width = 0;
+    end
+    peaks(end + 1, :) = [a(iPeak), f(iPeak), width]; %#ok<AGROW>
+end
+if isempty(peaks)
+    [h, ix] = max(a);
+    peaks = [h, f(ix), 0];
+end
+end
+
+function best = choosePeakPair(p1, p2)
+bestL = inf;
+best = [p1(1, :), p2(1, :)];
+for i = 1:size(p1, 1)
+    for j = 1:size(p2, 1)
+        h1 = p1(i, 1);
+        f1 = p1(i, 2);
+        w1 = p1(i, 3);
+        h2 = p2(j, 1);
+        f2 = p2(j, 2);
+        w2 = p2(j, 3);
+        L = max(0, 0.80 - h1)^2 + max(0, (w1 - 80) / 80)^2 ...
+            + max(0, 0.80 - h2)^2 + max(0, (w2 - 80) / 80)^2 ...
+            + (max(0, 100 - abs(f1 - f2)) / 100)^2 ...
+            - 1e-3 * (h1 + h2);
+        if L < bestL
+            bestL = L;
+            best = [h1, f1, w1, h2, f2, w2];
+        end
+    end
+end
+end
+
+function X = dedupe(X, tol)
+if isempty(X)
+    return;
+end
+key = round(X / tol);
+[~, ia] = unique(key, 'rows', 'stable');
+X = X(ia, :);
+end
+
+function printReport(info, name)
+fprintf(['%s 状态1：正向 %.0f–%.0f Hz 平均 %.4f，反向平均 %.4f，高出 %.4f；' ...
+    '反向峰 %.4f @ %.0f Hz，连续超过 0.5 的宽度 %.0f Hz。'], ...
+    name, info.fLo1, info.fHi1, info.meanB1, info.meanO1, info.gap1, ...
+    info.h1, info.fp1, info.w1);
+fprintf(' 宽带%s，窄带%s。\n', passFail(info.okBroad1), passFail(info.okNarrow1));
+fprintf(['%s 状态2：反向 %.0f–%.0f Hz 平均 %.4f，正向平均 %.4f，高出 %.4f；' ...
+    '正向峰 %.4f @ %.0f Hz，连续超过 0.5 的宽度 %.0f Hz。'], ...
+    name, info.fLo2, info.fHi2, info.meanB2, info.meanO2, info.gap2, ...
+    info.h2, info.fp2, info.w2);
+fprintf(' 宽带%s，窄带%s。\n', passFail(info.okBroad2), passFail(info.okNarrow2));
+fprintf('%s 窄带峰从 %.0f Hz 移到 %.0f Hz，移动 %.0f Hz，%s。\n', ...
+    name, info.fp1, info.fp2, info.shift, passFail(info.okShift));
+if info.allOk
+    fprintf('%s：两态的宽带、窄带和峰位移动都达到标准。\n', name);
+else
+    fprintf('%s：还没有同时达到两态标准和 100 Hz 峰位移动。\n', name);
+end
+end
+
+function s = passFail(flag)
+if flag
+    s = '达标';
+else
+    s = '未达标';
+end
+end
+
+function plotTwoStates(f, af1, ab1, af2, ab2, info, figPath)
+fontName = 'WenQuanYi Micro Hei';
+if exist('OCTAVE_VERSION', 'builtin')
+    set(0, 'defaultaxesfontname', fontName);
+    set(0, 'defaulttextfontname', fontName);
+end
+fig = figure('Color', 'w', 'Position', [80, 40, 980, 760], 'visible', 'off');
+subplot(2, 1, 1);
+hold on;
+shadeBand(info.fLo1, info.fHi1, [0.75, 0.85, 1]);
+hF1 = plot(f, af1, 'b-', 'LineWidth', 1.8);
+hB1 = plot(f, ab1, 'r--', 'LineWidth', 1.8);
+plot(f([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 0.8, 'HandleVisibility', 'off');
+labelPeak(f, af1, '正向吸声', 'b', []);
+labelPeak(f, ab1, '反向吸声', 'r', info.fp1);
+styleAxis(f, '状态1：蓝实线=正向吸声（宽带），红虚线=反向吸声（窄带）');
+legend([hF1, hB1], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
+
+subplot(2, 1, 2);
+hold on;
+shadeBand(info.fLo2, info.fHi2, [1, 0.86, 0.75]);
+hF2 = plot(f, af2, 'b-', 'LineWidth', 1.8);
+hB2 = plot(f, ab2, 'r--', 'LineWidth', 1.8);
+plot(f([1, end]), [0.5, 0.5], 'k:', 'LineWidth', 0.8, 'HandleVisibility', 'off');
+labelPeak(f, af2, '正向吸声', 'b', info.fp2);
+labelPeak(f, ab2, '反向吸声', 'r', []);
+styleAxis(f, '状态2：蓝实线=正向吸声（窄带），红虚线=反向吸声（宽带）');
+legend([hF2, hB2], {'正向吸声', '反向吸声'}, 'Location', 'northeast');
+
+print(fig, figPath, '-dpng', '-r140');
+close(fig);
+end
+
+function shadeBand(fLo, fHi, color)
+patch([fLo, fHi, fHi, fLo], [0, 0, 1.18, 1.18], color, ...
+    'FaceAlpha', 0.28, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+end
+
+function styleAxis(f, name)
+grid on;
+box on;
+xlim([f(1), f(end)]);
+ylim([0, 1.18]);
+xlabel('Frequency (Hz)');
+ylabel('Absorption');
+title(name);
+end
+
+function labelPeak(f, a, label, color, forcedF)
+if isempty(forcedF)
+    [pk, ix] = max(a);
+    x = f(ix);
+else
+    [~, ix] = min(abs(f - forcedF));
+    x = f(ix);
+    pk = a(ix);
+end
+if x > f(1) + 0.78 * (f(end) - f(1))
+    align = 'right';
+elseif x < f(1) + 0.22 * (f(end) - f(1))
+    align = 'left';
+else
+    align = 'center';
+end
+text(x, min(pk + 0.035, 1.08), label, 'Color', color, ...
+    'HorizontalAlignment', align, 'VerticalAlignment', 'bottom', ...
+    'FontSize', 11, 'Clipping', 'on');
+end
+
+function flushOut()
+if exist('OCTAVE_VERSION', 'builtin')
+    fflush(stdout);
+end
 end
