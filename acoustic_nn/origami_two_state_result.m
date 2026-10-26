@@ -221,9 +221,6 @@ else
 end
 
 figure('Color','w','Position',[80 40 980 760]);
-titles = { ...
-    '状态1：蓝实线 = 正向吸声，红虚线 = 反向吸声', ...
-    '状态2：蓝实线 = 正向吸声，红虚线 = 反向吸声'};
 
 for state = 1:2
     subplot(2,1,state);
