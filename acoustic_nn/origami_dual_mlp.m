@@ -9,8 +9,9 @@
 % 使用顺序和示意图一致：先逆向，再正向。
 % 逆向网络：2*Nf -> 256 -> 256 -> 128 -> 20
 %   一条正反向吸声曲线进去，20 个尺寸出来。
-% 正向网络：20 -> 128 -> 256 -> 256 -> 2*Nf
-%   20 个尺寸进去，正反向吸声曲线出来。正向网络先训练，然后冻住，再训练逆向网络。
+% 正向网络按频率预测：25 -> 256 -> 256 -> 128 -> 2。
+%   20 个尺寸加频率特征进去，该频率的正向、反向吸声出来。拼起来仍是一条曲线。
+% 正向网络先训练，然后冻住，再训练逆向网络。
 % 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3。
 %
 % 两种状态共用 12 个孔径。状态 2 只改 8 个实际腔高。
@@ -113,10 +114,11 @@ fprintf('加入配对样本后共 %d 组。\n', size(X, 1));
 yWeight = spectrumWeight(fTrain);
 
 nSpec = 2 * numel(fTrain);
-fprintf('\n===== 训练正向网络：20 -> 128 -> 256 -> 256 -> %d =====\n', nSpec);
-net = initMLP([20, 128, 256, 256, nSpec], {'relu', 'relu', 'relu', 'linear'});
-[net, history] = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
-    maxEpoch, minEpoch, batchSize, learnRate, yWeight, '正向网络');
+fprintf('\n===== 训练正向网络：每个频率单独预测，25 -> 256 -> 256 -> 128 -> 2 =====\n');
+net = initMLP([25, 256, 256, 128, 2], {'relu', 'relu', 'relu', 'linear'});
+net.mode = 'freq';
+[net, history] = trainFreqRegressor(net, XTrain, YTrain, XVal, YVal, fTrain, ...
+    maxEpoch, minEpoch, learnRate, '正向网络');
 [testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
 
 yMean = mean(YTrain, 1);
@@ -126,15 +128,15 @@ fprintf('\n===== 训练逆向网络：%d -> 256 -> 256 -> 128 -> 20 =====\n', nS
 fprintf('正向网络已冻住。逆向网络先给出尺寸，再送进正向网络，让还原出的曲线贴近原曲线。\n');
 inverseNet = initMLP([nSpec, 256, 256, 128, 20], {'relu', 'relu', 'relu', 'linear'});
 inverseNet = trainInverse(inverseNet, net, XTrain, YTrain, XVal, YVal, ...
-    yMean, yStd, invEpoch, batchSize, learnRate);
-reportInverse(inverseNet, net, XTest, YTest, yMean, yStd, '测试集');
+    yMean, yStd, fTrain, invEpoch, batchSize, learnRate);
+reportInverse(inverseNet, net, XTest, YTest, yMean, yStd, fTrain, '测试集');
 
 if accuracyOnly
     outDir = fileparts(mfilename('fullpath'));
     if isempty(outDir)
         outDir = pwd;
     end
-    plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, outDir);
+    plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, fTrain, outDir);
     fprintf('精度图已保存。\n');
     return;
 end
@@ -773,6 +775,145 @@ cache = mlpForward(net, X.');
 Y = cache.y.';
 end
 
+function feat = freqFeatures(f)
+fn = (f(:).' - 100) / 600;
+feat = [fn; sin(2 * pi * fn); cos(2 * pi * fn); sin(4 * pi * fn); cos(4 * pi * fn)];
+end
+
+function Y = forwardPredict(net, X, f)
+if ~isfield(net, 'mode') || ~strcmp(net.mode, 'freq')
+    Y = mlpPredict(net, X);
+    return;
+end
+nf = numel(f);
+n = size(X, 1);
+Y = zeros(n, 2 * nf);
+feat = freqFeatures(f);
+for s = 1:400:n
+    e = min(s + 399, n);
+    block = predictFreqBlock(net, X(s:e, :), feat);
+    Y(s:e, :) = block;
+end
+end
+
+function Y = predictFreqBlock(net, X, feat)
+ng = size(X, 1);
+nf = size(feat, 2);
+Xin = [kron(ones(nf, 1), X), kron(feat.', ones(ng, 1))];
+Yhat = mlpPredict(net, Xin);
+af = zeros(ng, nf);
+ab = zeros(ng, nf);
+for k = 1:nf
+    rows = (k - 1) * ng + (1:ng);
+    af(:, k) = Yhat(rows, 1);
+    ab(:, k) = Yhat(rows, 2);
+end
+Y = [af, ab];
+end
+
+function dX = forwardGeometryGrad(net, X, f, dY)
+nf = numel(f);
+n = size(X, 1);
+if ~isfield(net, 'mode') || ~strcmp(net.mode, 'freq')
+    cache = mlpForward(net, X.');
+    g = inputGradient(net, cache, dY.');
+    dX = g.';
+    return;
+end
+feat = freqFeatures(f);
+dX = zeros(n, 20);
+for s = 1:200:n
+    e = min(s + 199, n);
+    ng = e - s + 1;
+    Xin = [kron(ones(nf, 1), X(s:e, :)), kron(feat.', ones(ng, 1))];
+    cache = mlpForward(net, Xin.');
+    dBlock = zeros(ng * nf, 2);
+    for k = 1:nf
+        rows = (k - 1) * ng + (1:ng);
+        dBlock(rows, 1) = dY(s:e, k);
+        dBlock(rows, 2) = dY(s:e, nf + k);
+    end
+    gXin = inputGradient(net, cache, dBlock.');
+    for k = 1:nf
+        cols = (k - 1) * ng + (1:ng);
+        dX(s:e, :) = dX(s:e, :) + gXin(1:20, cols).';
+    end
+end
+end
+
+function [net, history] = trainFreqRegressor(net, X, Y, XVal, YVal, f, epochs, minEpoch, learnRate, name)
+adam = initAdam(net);
+n = size(X, 1);
+feat = freqFeatures(f);
+nf = numel(f);
+geomBatch = 64;
+bestMae = inf;
+bestNet = copyNet(net);
+stall = 0;
+lr = learnRate;
+history.epoch = [];
+history.trainMse = [];
+history.valMse = [];
+freqEpoch = min(epochs, 24);
+for epoch = 1:freqEpoch
+    if epoch == 13
+        lr = learnRate * 0.3;
+    end
+    order = randperm(n);
+    total = 0;
+    seen = 0;
+    for s = 1:geomBatch:n
+        batch = order(s:min(s + geomBatch - 1, n));
+        [Xin, Yin] = expandFreqBatch(X(batch, :), Y(batch, :), feat);
+        peak = (Yin(:, 1) > 0.45) + (Yin(:, 2) > 0.45);
+        ww = 1 + 2 * peak;
+        ww = ww / mean(ww);
+        cache = mlpForward(net, Xin.');
+        diff = cache.y - Yin.';
+        total = total + sum(diff(:) .^ 2);
+        seen = seen + numel(diff);
+        grads = mlpBackward(net, cache, (2 / numel(diff)) * (diff .* ww.'));
+        [net, adam] = adamApply(net, adam, grads, lr);
+    end
+    pred = forwardPredict(net, XVal, f);
+    mae = mean(abs(pred(:) - YVal(:)));
+    valMse = mean((pred(:) - YVal(:)) .^ 2);
+    history.epoch(end + 1) = epoch; %#ok<AGROW>
+    history.trainMse(end + 1) = total / max(seen, 1); %#ok<AGROW>
+    history.valMse(end + 1) = valMse; %#ok<AGROW>
+    fprintf('%s epoch %02d  train_mse=%.6e  val_mae=%.6e\n', ...
+        name, epoch, total / max(seen, 1), mae);
+    flushOut();
+    if mae + 1e-5 < bestMae
+        bestMae = mae;
+        bestNet = copyNet(net);
+        stall = 0;
+    else
+        stall = stall + 1;
+    end
+    if epoch >= min(minEpoch, freqEpoch) && stall >= 6
+        fprintf('%s 验证误差停住，采用此前的最优权重。\n', name);
+        break;
+    end
+end
+net = bestNet;
+net.mode = 'freq';
+end
+
+function [Xin, Yin] = expandFreqBatch(X, Y, feat)
+ng = size(X, 1);
+nf = size(feat, 2);
+Xin = [kron(ones(nf, 1), X), kron(feat.', ones(ng, 1))];
+af = Y(:, 1:nf);
+ab = Y(:, nf + 1:end);
+Yin = zeros(ng * nf, 2);
+for k = 1:nf
+    rows = (k - 1) * ng + (1:ng);
+    Yin(rows, 1) = af(:, k);
+    Yin(rows, 2) = ab(:, k);
+end
+end
+
 function cache = mlpForward(net, X)
 h = X;
 for k = 1:numel(net.W)
@@ -896,7 +1037,7 @@ net = out;
 end
 
 function [maeF, maeB, maeBand] = reportMae(net, X, Y, f, name)
-pred = mlpPredict(net, X);
+pred = forwardPredict(net, X, f);
 nf = numel(f);
 band = f >= 300 & f <= 500;
 afP = pred(:, 1:nf);
@@ -910,9 +1051,9 @@ maeBand = mean(abs(bandErr(:)));
 fprintf('%s MAE  正向 %.4f  反向 %.4f  300–500 Hz %.4f\n', name, maeF, maeB, maeBand);
 end
 
-function [af, ab] = predictAbs(net, xMean, xStd, Xmm)
+function [af, ab] = predictAbs(net, xMean, xStd, Xmm, f)
 Xs = standardizeRows(Xmm, xMean, xStd);
-Y = mlpPredict(net, Xs);
+Y = forwardPredict(net, Xs, f);
 nf = size(Y, 2) / 2;
 af = Y(:, 1:nf);
 ab = Y(:, nf + 1:end);
@@ -1104,7 +1245,7 @@ end
 
 function loss = netLossOf(net, xMean, xStd, f, X)
 d = X(:, 1:12);
-[af, ab] = predictAbs(net, xMean, xStd, [d, X(:, 13:20); d, X(:, 21:28)]);
+[af, ab] = predictAbs(net, xMean, xStd, [d, X(:, 13:20); d, X(:, 21:28)], f);
 n = size(X, 1);
 af1 = af(1:n, :);
 ab1 = ab(1:n, :);
@@ -1367,7 +1508,7 @@ end
 end
 
 function inverseNet = trainInverse(inverseNet, forwardNet, X, Y, XVal, YVal, ...
-    yMean, yStd, epochs, batchSize, learnRate)
+    yMean, yStd, f, epochs, batchSize, learnRate)
 adam = initAdam(inverseNet);
 n = size(X, 1);
 useBatch = min(batchSize, n);
@@ -1385,19 +1526,19 @@ for epoch = 1:epochs
         Ys = (Yb - yMean) ./ yStd;
         cacheI = mlpForward(inverseNet, Ys.');
         xHat = cacheI.y;
-        cacheF = mlpForward(forwardNet, xHat);
-        specDiff = cacheF.y - Yb.';
+        specDiff = forwardPredict(forwardNet, xHat.', f).' - Yb.';
         geomDiff = xHat - X(batch, :).';
         totalSpec = totalSpec + sum(specDiff(:) .^ 2);
         totalGeom = totalGeom + sum(geomDiff(:) .^ 2);
         seenSpec = numel(specDiff);
         seenGeom = numel(geomDiff);
         seen = seen + size(Yb, 1);
-        dX = (2 / seenGeom) * geomDiff + inputGradient(forwardNet, cacheF, (2 / seenSpec) * specDiff);
+        dXspec = forwardGeometryGrad(forwardNet, xHat.', f, (2 / seenSpec) * specDiff.');
+        dX = (2 / seenGeom) * geomDiff + dXspec.';
         grads = mlpBackward(inverseNet, cacheI, dX);
         [inverseNet, adam] = adamApply(inverseNet, adam, grads, learnRate);
     end
-    valLoss = inverseValLoss(inverseNet, forwardNet, XVal, YVal, yMean, yStd);
+    valLoss = inverseValLoss(inverseNet, forwardNet, XVal, YVal, yMean, yStd, f);
     fprintf('逆向网络 epoch %02d  频谱mse=%.6e  尺寸mse=%.6e  验证频谱mse=%.6e\n', ...
         epoch, totalSpec / max(seen * size(Y, 2), 1), totalGeom / max(seen * size(X, 2), 1), valLoss);
     flushOut();
@@ -1416,17 +1557,17 @@ end
 inverseNet = bestNet;
 end
 
-function value = inverseValLoss(inverseNet, forwardNet, X, Y, yMean, yStd)
+function value = inverseValLoss(inverseNet, forwardNet, X, Y, yMean, yStd, f)
 Ys = (Y - yMean) ./ yStd;
 xHat = mlpPredict(inverseNet, Ys);
-yHat = mlpPredict(forwardNet, xHat);
+yHat = forwardPredict(forwardNet, xHat, f);
 value = mean((yHat(:) - Y(:)) .^ 2);
 end
 
-function reportInverse(inverseNet, forwardNet, X, Y, yMean, yStd, name)
+function reportInverse(inverseNet, forwardNet, X, Y, yMean, yStd, f, name)
 Ys = (Y - yMean) ./ yStd;
 xHat = mlpPredict(inverseNet, Ys);
-yHat = mlpPredict(forwardNet, xHat);
+yHat = forwardPredict(forwardNet, xHat, f);
 mae = mean(abs(yHat(:) - Y(:)));
 rValue = pearsonR(Y, yHat);
 fprintf('%s  逆向再正向  吸声 MAE %.4f  R %.4f\n', name, mae, rValue);
@@ -1480,10 +1621,10 @@ Ylead(3, :) = [af, ab];
 Ylag(3, :) = [ab, af];
 end
 
-function plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, outDir)
-predTrain = mlpPredict(net, XTrain);
-predVal = mlpPredict(net, XVal);
-predTest = mlpPredict(net, XTest);
+function plotAccuracy(history, net, XTrain, YTrain, XVal, YVal, XTest, YTest, f, outDir)
+predTrain = forwardPredict(net, XTrain, f);
+predVal = forwardPredict(net, XVal, f);
+predTest = forwardPredict(net, XTest, f);
 errTrain = relativeError(predTrain, YTrain);
 errVal = relativeError(predVal, YVal);
 errTest = relativeError(predTest, YTest);
