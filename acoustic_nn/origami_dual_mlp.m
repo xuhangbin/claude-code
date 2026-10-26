@@ -9,7 +9,7 @@
 % 使用顺序和示意图一致：先逆向，再正向。
 % 逆向网络：2*Nf -> 256 -> 256 -> 128 -> 20
 %   一条正反向吸声曲线进去，20 个尺寸出来。
-% 正向网络：20 -> 64 -> 128 -> 128 -> 2*Nf
+% 正向网络：20 -> 128 -> 256 -> 256 -> 2*Nf
 %   20 个尺寸进去，正反向吸声曲线出来。正向网络先训练，然后冻住，再训练逆向网络。
 % 隐藏层 ReLU，输出线性，Glorot 均匀初始化，Adam，学习率 1e-3。
 %
@@ -79,11 +79,11 @@ if quick
     nPairH = 4;
     invEpoch = 1;
 else
-    nSamples = 12000;
-    nPert = 4;
-    maxHot = 800;
-    maxEpoch = 32;
-    minEpoch = 14;
+    nSamples = 20000;
+    nPert = 6;
+    maxHot = 1500;
+    maxEpoch = 80;
+    minEpoch = 40;
     nRestart = 5;
     nPop = 40;
     nGen = 24;
@@ -96,6 +96,9 @@ else
     invEpoch = 20;
 end
 learnRate = 1e-3;
+if accuracyOnly
+    invEpoch = min(invEpoch, 4);
+end
 
 fprintf('生成训练集（均匀 %d 组）...\n', nSamples);
 [X, Y] = buildDataset(nSamples, nPert, maxHot, fTrain, modelTrain, const);
@@ -110,8 +113,8 @@ fprintf('加入配对样本后共 %d 组。\n', size(X, 1));
 yWeight = spectrumWeight(fTrain);
 
 nSpec = 2 * numel(fTrain);
-fprintf('\n===== 训练正向网络：20 -> 64 -> 128 -> 128 -> %d =====\n', nSpec);
-net = initMLP([20, 64, 128, 128, nSpec], {'relu', 'relu', 'relu', 'linear'});
+fprintf('\n===== 训练正向网络：20 -> 128 -> 256 -> 256 -> %d =====\n', nSpec);
+net = initMLP([20, 128, 256, 256, nSpec], {'relu', 'relu', 'relu', 'linear'});
 [net, history] = trainRegressor(net, XTrain, YTrain, XVal, YVal, ...
     maxEpoch, minEpoch, batchSize, learnRate, yWeight, '正向网络');
 [testMaeF, testMaeB] = reportMae(net, XTest, YTest, fTrain, '测试集');
@@ -751,10 +754,7 @@ end
 
 function w = spectrumWeight(f)
 nf = numel(f);
-band = double(f >= 300 & f <= 500);
-wb = 1 + 3 * band;
-w = [wb, wb];
-w = w / mean(w);
+w = ones(1, 2 * nf);
 end
 
 function net = initMLP(sizes, acts)
@@ -840,10 +840,14 @@ w = yWeight(:);
 bestMae = inf;
 bestNet = net;
 stall = 0;
+lr = learnRate;
 history.epoch = [];
 history.trainMse = [];
 history.valMse = [];
 for epoch = 1:epochs
+    if epoch == 41
+        lr = learnRate * 0.25;
+    end
     order = randperm(n);
     total = 0;
     plain = 0;
@@ -856,7 +860,7 @@ for epoch = 1:epochs
         plain = plain + sum(diff(:) .^ 2);
         seen = seen + numel(diff);
         grads = mlpBackward(net, cache, (2 / numel(diff)) * (diff .* w));
-        [net, adam] = adamApply(net, adam, grads, learnRate);
+        [net, adam] = adamApply(net, adam, grads, lr);
     end
     pred = mlpPredict(net, XVal);
     mae = mean(abs(pred(:) - YVal(:)));
@@ -874,7 +878,7 @@ for epoch = 1:epochs
     else
         stall = stall + 1;
     end
-    if epoch >= minEpoch && stall >= 8
+    if epoch >= minEpoch && stall >= 12
         fprintf('%s 验证误差停住，采用此前的最优权重。\n', name);
         break;
     end
