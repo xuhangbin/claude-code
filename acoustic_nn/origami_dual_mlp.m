@@ -1532,8 +1532,13 @@ if exist(savedPath, 'file')
         fprintf('从已有几何继续，当前损失 %.6f。\n', bestLoss);
     end
 end
-for restart = 1:3
-    fprintf('第 %d / 3 组\n', restart);
+nRestart = 3;
+if ~isempty(bestX)
+    nRestart = 0;
+    fprintf('已有达标几何，直接压缩特征值间距。\n');
+end
+for restart = 1:nRestart
+    fprintf('第 %d / %d 组\n', restart, nRestart);
     [xTry, lossTry] = deOptimize( ...
         @(X) epBatchLoss(X, fLock, modelLock), lo, hi, 48, 35, bestX);
     fprintf('  损失 %.6f\n', lossTry);
@@ -1542,9 +1547,12 @@ for restart = 1:3
         bestX = xTry;
     end
 end
-bestX = epIntensify(bestX, fLock, modelLock, const);
-bestX = epCoordinate(bestX, fLock, modelLock, const);
-bestX = epPolish(bestX, fLock, modelLock, const);
+if nRestart > 0
+    bestX = epIntensify(bestX, fLock, modelLock, const);
+    bestX = epCoordinate(bestX, fLock, modelLock, const);
+    bestX = epPolish(bestX, fLock, modelLock, const);
+end
+bestX = epCollapse(bestX, fLock, modelLock, const);
 [lossFinal, rep] = epOne(bestX, fLock, modelLock);
 fprintf('\n========== 同一频率上的两侧对调 ==========\n');
 fprintf('最好频率 %.0f Hz，联合损失 %.6f，达标频率点 %d 个\n', ...
@@ -1553,6 +1561,7 @@ fprintf('状态1  正向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.af1, rep.R
 fprintf('状态1  反向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.ab1, rep.Rb1, rep.T1);
 fprintf('状态2  正向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.af2, rep.Rf2, rep.T2);
 fprintf('状态2  反向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.ab2, rep.Rb2, rep.T2);
+fprintf('状态1 特征值间距 %.6e   状态2 特征值间距 %.6e\n', rep.gap1, rep.gap2);
 if rep.nGood > 0
     fprintf('这些频率上两侧同时对调：');
     fprintf(' %.0f', rep.goodF);
@@ -1630,6 +1639,78 @@ rep.Rb2 = info.Rb2(1, k);
 rep.T2 = info.T2(1, k);
 rep.nGood = info.nGood(1);
 rep.goodF = f(info.good(1, :));
+rep.gap1 = 2 * (max(rep.Rf1, 0) * max(rep.Rb1, 0)) ^ 0.25;
+rep.gap2 = 2 * (max(rep.Rf2, 0) * max(rep.Rb2, 0)) ^ 0.25;
+end
+
+function x = epCollapse(x, f, model, const)
+% 在吸声仍满足 0.99 / 0.01 的前提下，把 |λ+-λ-|=2*(R小*R大)^0.25 压小。
+lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
+hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
+step = [0.8 * ones(1, 12), 3 * ones(1, 16)];
+baseLoss = epGapLoss(x, f, model);
+fprintf('开始压特征值间距，当前损失 %.6f。\n', baseLoss);
+for scale = [0.2, 0.06, 0.02, 0.006, 0.002, 0.0006]
+    for roundId = 1:8
+        cloud = x + randn(160, numel(x)) .* (step * scale);
+        cloud = min(max(cloud, lo), hi);
+        cloud = [x; cloud]; %#ok<AGROW>
+        loss = epGapLoss(cloud, f, model);
+        [bestLoss, key] = min(loss);
+        if bestLoss + 1e-12 < baseLoss
+            x = cloud(key, :);
+            baseLoss = bestLoss;
+        end
+    end
+    fprintf('  间距尺度 %.4f  损失 %.6f\n', scale, baseLoss);
+end
+base = [0.15 * ones(1, 12), 0.6 * ones(1, 16)];
+for scale = [1, 0.25, 0.06, 0.015, 0.004]
+    stepNow = base * scale;
+    improved = true;
+    nPass = 0;
+    while improved && nPass < 20
+        improved = false;
+        nPass = nPass + 1;
+        trials = zeros(0, numel(x));
+        for j = 1:numel(x)
+            xp = x;
+            xm = x;
+            xp(j) = min(hi(j), x(j) + stepNow(j));
+            xm(j) = max(lo(j), x(j) - stepNow(j));
+            trials = [trials; xp; xm]; %#ok<AGROW>
+        end
+        loss = epGapLoss(trials, f, model);
+        current = epGapLoss(x, f, model);
+        [bestLoss, key] = min(loss);
+        if bestLoss + 1e-14 < current
+            x = trials(key, :);
+            improved = true;
+        end
+    end
+    fprintf('  间距坐标 %.3f  损失 %.6f\n', scale, epGapLoss(x, f, model));
+end
+span = [0.35 * ones(1, 12), 1.2 * ones(1, 16)];
+loBox = max(lo, x - span);
+hiBox = min(hi, x + span);
+fprintf('在当前几何附近再搜一轮。\n');
+[x, ~] = deOptimize(@(X) epGapLoss(X, f, model), loBox, hiBox, 36, 18, x);
+end
+
+function loss = epGapLoss(X, f, model)
+[af1, ab1, Rf1, Rb1, T1] = acousticPower(X(:, 1:12), X(:, 13:20), f, model);
+[af2, ab2, Rf2, Rb2, T2] = acousticPower(X(:, 1:12), X(:, 21:28), f, model);
+gap1 = 2 * (max(Rf1, 0) .* max(Rb1, 0)) .^ 0.25;
+gap2 = 2 * (max(Rf2, 0) .* max(Rb2, 0)) .^ 0.25;
+% 吸声侧不低于 0.999，全反射侧不低于 0.997，避免为了缩小间距把反射侧推到 0.99。
+pen = max(0, 0.999 - af1) .^ 2 + max(0, Rf1 - 0.001) .^ 2 + max(0, T1 - 0.001) .^ 2 ...
+    + max(0, 0.997 - Rb1) .^ 2 + max(0, ab1 - 0.003) .^ 2 ...
+    + max(0, 0.999 - ab2) .^ 2 + max(0, Rb2 - 0.001) .^ 2 + max(0, T2 - 0.001) .^ 2 ...
+    + max(0, 0.997 - Rf2) .^ 2 + max(0, af2 - 0.003) .^ 2;
+fid = (Rb1 - 1) .^ 2 + ab1 .^ 2 + (Rf2 - 1) .^ 2 + af2 .^ 2;
+bad = ~isfinite(gap1) | ~isfinite(gap2);
+loss = gap1 + gap2 + 400 * pen + 8 * fid;
+loss(bad) = 1e3;
 end
 
 function x = epIntensify(x, f, model, const)
