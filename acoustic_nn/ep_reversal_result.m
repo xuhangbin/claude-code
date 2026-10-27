@@ -115,6 +115,9 @@ Hstate = cat(3,H1,H2);
 alpha = zeros(2,2,Nf);
 refl = zeros(2,2,Nf);
 trans = zeros(2,Nf);
+rfC = complex(zeros(2,Nf));
+rbC = complex(zeros(2,Nf));
+tauC = complex(zeros(2,Nf));
 
 for state = 1:2
     H = Hstate(:,:,state);
@@ -194,6 +197,9 @@ for state = 1:2
     refl(state,1,:) = abs(rf).^2;
     refl(state,2,:) = abs(rb).^2;
     trans(state,:) = abs(tau).^2;
+    rfC(state,:) = rf;
+    rbC(state,:) = rb;
+    tauC(state,:) = tau;
 end
 
 %% 7. 同一频率上的两侧对调
@@ -257,4 +263,72 @@ if isempty(outDir)
     outDir = pwd;
 end
 print(gcf, fullfile(outDir, 'ep_reversal_result.png'), '-dpng', '-r140');
+
+%% 9. 并联后散射矩阵的两个特征值
+% 四单元已经在上面合成一条双端口通道。散射矩阵为
+%   S = [ rf , tau ;
+%         tau, rb  ]
+% 两个特征值
+%   lambda± = (rf+rb)/2 ± sqrt( ((rf-rb)/2)^2 + tau^2 )
+% 开方沿频率连续跟踪，避免主值开方把 λ+ 和 λ- 对调。
+
+lamP = complex(zeros(2,Nf));
+lamM = complex(zeros(2,Nf));
+for state = 1:2
+    rf = rfC(state,:);
+    rb = rbC(state,:);
+    tau = tauC(state,:);
+    half = (rf+rb)/2;
+    disc = sqrt(((rf-rb)/2).^2 + tau.^2);
+    plus = half+disc;
+    minus = half-disc;
+    for ii = 2:Nf
+        if abs(plus(ii)-plus(ii-1))+abs(minus(ii)-minus(ii-1)) ...
+                > abs(plus(ii)-minus(ii-1))+abs(minus(ii)-plus(ii-1))
+            tmp = plus(ii);
+            plus(ii) = minus(ii);
+            minus(ii) = tmp;
+        end
+    end
+    lamP(state,:) = plus;
+    lamM(state,:) = minus;
+end
+
+i400 = find(f==400, 1);
+fprintf('\n========== 散射矩阵特征值 ==========\n');
+for state = 1:2
+    fprintf('状态%d  400 Hz\n', state);
+    fprintf('  Re(λ+) % .6f   Re(λ-) % .6f\n', real(lamP(state,i400)), real(lamM(state,i400)));
+    fprintf('  Im(λ+) % .6f   Im(λ-) % .6f\n', imag(lamP(state,i400)), imag(lamM(state,i400)));
+end
+
+eigTitle = {'状态1 实部', '状态1 虚部', '状态2 实部', '状态2 虚部'};
+figure('Color','w','Position',[60 60 1100 760]);
+for p = 1:4
+    subplot(2,2,p);
+    st = ceil(p/2);
+    hold on;
+    if mod(p,2)==1
+        yP = real(lamP(st,:));
+        yM = real(lamM(st,:));
+        ylab = 'Real part';
+    else
+        yP = imag(lamP(st,:));
+        yM = imag(lamM(st,:));
+        ylab = 'Imaginary part';
+    end
+    hP = plot(f, yP, 'b-', 'LineWidth', 1.6);
+    hM = plot(f, yM, 'r--', 'LineWidth', 1.6);
+    yl = ylim;
+    plot([400 400], yl, 'Color', [0.55 0.55 0.55], 'LineWidth', 1.0, 'HandleVisibility', 'off');
+    ylim(yl);
+    grid on; box on;
+    xlim([100 700]);
+    xticks(100:100:700);
+    xlabel('Frequency/Hz'); ylabel(ylab);
+    title(eigTitle{p}, 'FontWeight', 'normal');
+    legend([hP, hM], {'\lambda+', '\lambda-'}, 'Location', 'best');
+    set(gca, 'FontName', 'Times New Roman', 'FontSize', 12, 'LineWidth', 1.0, 'TickDir', 'in');
+end
+print(gcf, fullfile(outDir, 'ep_reversal_eigenvalues.png'), '-dpng', '-r140');
 fprintf('图已保存。\n');
