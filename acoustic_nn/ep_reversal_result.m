@@ -304,7 +304,7 @@ for state = 1:2
 end
 
 eigTitle = {'状态1', '状态2'};
-figure('Color','w','Position',[80 80 1000 720]);
+figure('Color','w','Position',[80 40 1000 820]);
 for st = 1:2
     subplot(2,1,st);
     hold on;
@@ -320,9 +320,22 @@ for st = 1:2
     xlim([100 700]);
     xticks(100:100:700);
     xlabel('Frequency/Hz'); ylabel('Eigenvalue');
-    title(eigTitle{st}, 'FontWeight', 'normal');
-    legend([h1 h2 h3 h4], {'Re(\lambda+)','Re(\lambda-)','Im(\lambda+)','Im(\lambda-)'}, 'Location', 'best');
+    title(sprintf('%s  400 Hz   Re+ %.4f   Re- %.4f   Im+ %.4f   Im- %.4f', ...
+        eigTitle{st}, real(lamP(st,i400)), real(lamM(st,i400)), ...
+        imag(lamP(st,i400)), imag(lamM(st,i400))), 'FontWeight', 'normal');
+    legend([h1 h2 h3 h4], {'Re(\lambda+)','Re(\lambda-)','Im(\lambda+)','Im(\lambda-)'}, 'Location', 'northeast');
     set(gca, 'FontName', 'Times New Roman', 'FontSize', 12, 'LineWidth', 1.0, 'TickDir', 'in');
 end
 print(gcf, fullfile(outDir, 'ep_reversal_eigenvalues.png'), '-dpng', '-r140');
+
+fid = fopen(fullfile(outDir, 'ep_reversal_eigenvalues.csv'), 'w');
+fprintf(fid, 'state,frequency_Hz,Re_plus,Re_minus,Im_plus,Im_minus,abs_difference\n');
+for state = 1:2
+    fprintf(fid, '%d,400,%.8f,%.8f,%.8f,%.8f,%.8e\n', state, ...
+        real(lamP(state,i400)), real(lamM(state,i400)), ...
+        imag(lamP(state,i400)), imag(lamM(state,i400)), ...
+        abs(lamP(state,i400)-lamM(state,i400)));
+end
+fclose(fid);
+fprintf('400 Hz 的四个数在图的标题上，也写在 ep_reversal_eigenvalues.csv。\n');
 fprintf('图已保存。\n');
