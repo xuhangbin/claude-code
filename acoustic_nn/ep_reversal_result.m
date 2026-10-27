@@ -294,6 +294,21 @@ for state = 1:2
     lamM(state,:) = minus;
 end
 
+% 先放进工作区，后面的画图即使中断，这些变量也还在。
+Frequency_Hz = f(:);
+State1_Re_plus = real(lamP(1,:)).';
+State1_Im_plus = imag(lamP(1,:)).';
+State1_Re_minus = real(lamM(1,:)).';
+State1_Im_minus = imag(lamM(1,:)).';
+State2_Re_plus = real(lamP(2,:)).';
+State2_Im_plus = imag(lamP(2,:)).';
+State2_Re_minus = real(lamM(2,:)).';
+State2_Im_minus = imag(lamM(2,:)).';
+save(fullfile(outDir, 'ep_reversal_eigenvalues.mat'), ...
+    'Frequency_Hz', ...
+    'State1_Re_plus', 'State1_Im_plus', 'State1_Re_minus', 'State1_Im_minus', ...
+    'State2_Re_plus', 'State2_Im_plus', 'State2_Re_minus', 'State2_Im_minus');
+
 i400 = find(f==400, 1);
 fprintf('\n========== 散射矩阵特征值 ==========\n');
 for state = 1:2
@@ -328,16 +343,6 @@ for st = 1:2
 end
 print(gcf, fullfile(outDir, 'ep_reversal_eigenvalues.png'), '-dpng', '-r140');
 
-% 工作区：两个状态、λ+ 和 λ-、实部和虚部，每个都是一整条频率曲线。
-Frequency_Hz = f(:);
-State1_Re_plus = real(lamP(1,:)).';
-State1_Im_plus = imag(lamP(1,:)).';
-State1_Re_minus = real(lamM(1,:)).';
-State1_Im_minus = imag(lamM(1,:)).';
-State2_Re_plus = real(lamP(2,:)).';
-State2_Im_plus = imag(lamP(2,:)).';
-State2_Re_minus = real(lamM(2,:)).';
-State2_Im_minus = imag(lamM(2,:)).';
 EigenvalueData = [ ...
     Frequency_Hz, ...
     State1_Re_plus, State1_Im_plus, State1_Re_minus, State1_Im_minus, ...
