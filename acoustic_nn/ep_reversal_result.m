@@ -328,14 +328,29 @@ for st = 1:2
 end
 print(gcf, fullfile(outDir, 'ep_reversal_eigenvalues.png'), '-dpng', '-r140');
 
+% 工作区数据。每行一个频率，两个状态的特征值实部、虚部都在里面。
+EigenvalueData = [ ...
+    f(:), ...
+    real(lamP(1,:)).', imag(lamP(1,:)).', real(lamM(1,:)).', imag(lamM(1,:)).', ...
+    real(lamP(2,:)).', imag(lamP(2,:)).', real(lamM(2,:)).', imag(lamM(2,:)).'];
+EigenvalueNames = { ...
+    'Frequency_Hz', ...
+    'State1_Re_plus', 'State1_Im_plus', 'State1_Re_minus', 'State1_Im_minus', ...
+    'State2_Re_plus', 'State2_Im_plus', 'State2_Re_minus', 'State2_Im_minus'};
+
 fid = fopen(fullfile(outDir, 'ep_reversal_eigenvalues.csv'), 'w');
-fprintf(fid, 'state,frequency_Hz,Re_plus,Re_minus,Im_plus,Im_minus,abs_difference\n');
-for state = 1:2
-    fprintf(fid, '%d,400,%.8f,%.8f,%.8f,%.8f,%.8e\n', state, ...
-        real(lamP(state,i400)), real(lamM(state,i400)), ...
-        imag(lamP(state,i400)), imag(lamM(state,i400)), ...
-        abs(lamP(state,i400)-lamM(state,i400)));
+fprintf(fid, '%s', EigenvalueNames{1});
+for k = 2:numel(EigenvalueNames)
+    fprintf(fid, ',%s', EigenvalueNames{k});
+end
+fprintf(fid, '\n');
+for ii = 1:Nf
+    fprintf(fid, '%.1f', EigenvalueData(ii,1));
+    fprintf(fid, ',%.8f', EigenvalueData(ii,2:end));
+    fprintf(fid, '\n');
 end
 fclose(fid);
-fprintf('400 Hz 的四个数在图的标题上，也写在 ep_reversal_eigenvalues.csv。\n');
+fprintf('特征值在工作区变量 EigenvalueData 里，共 %d 行。400 Hz 是第 %d 行。\n', Nf, i400);
+disp(EigenvalueNames);
+disp(EigenvalueData(i400,:));
 fprintf('图已保存。\n');
