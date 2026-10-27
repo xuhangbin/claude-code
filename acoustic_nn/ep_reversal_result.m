@@ -328,11 +328,20 @@ for st = 1:2
 end
 print(gcf, fullfile(outDir, 'ep_reversal_eigenvalues.png'), '-dpng', '-r140');
 
-% 工作区数据。每行一个频率，两个状态的特征值实部、虚部都在里面。
+% 工作区：两个状态、λ+ 和 λ-、实部和虚部，每个都是一整条频率曲线。
+Frequency_Hz = f(:);
+State1_Re_plus = real(lamP(1,:)).';
+State1_Im_plus = imag(lamP(1,:)).';
+State1_Re_minus = real(lamM(1,:)).';
+State1_Im_minus = imag(lamM(1,:)).';
+State2_Re_plus = real(lamP(2,:)).';
+State2_Im_plus = imag(lamP(2,:)).';
+State2_Re_minus = real(lamM(2,:)).';
+State2_Im_minus = imag(lamM(2,:)).';
 EigenvalueData = [ ...
-    f(:), ...
-    real(lamP(1,:)).', imag(lamP(1,:)).', real(lamM(1,:)).', imag(lamM(1,:)).', ...
-    real(lamP(2,:)).', imag(lamP(2,:)).', real(lamM(2,:)).', imag(lamM(2,:)).'];
+    Frequency_Hz, ...
+    State1_Re_plus, State1_Im_plus, State1_Re_minus, State1_Im_minus, ...
+    State2_Re_plus, State2_Im_plus, State2_Re_minus, State2_Im_minus];
 EigenvalueNames = { ...
     'Frequency_Hz', ...
     'State1_Re_plus', 'State1_Im_plus', 'State1_Re_minus', 'State1_Im_minus', ...
@@ -350,7 +359,9 @@ for ii = 1:Nf
     fprintf(fid, '\n');
 end
 fclose(fid);
-fprintf('特征值在工作区变量 EigenvalueData 里，共 %d 行。400 Hz 是第 %d 行。\n', Nf, i400);
+fprintf('工作区已有 8 条曲线，每条 %d 个数，400 Hz 是第 %d 行。\n', Nf, i400);
+fprintf('State1_Re_plus  State1_Im_plus  State1_Re_minus  State1_Im_minus\n');
+fprintf('State2_Re_plus  State2_Im_plus  State2_Re_minus  State2_Im_minus\n');
 disp(EigenvalueNames);
 disp(EigenvalueData(i400,:));
 fprintf('图已保存。\n');
