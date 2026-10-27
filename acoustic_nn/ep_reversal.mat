@@ -1,0 +1,100 @@
+# Created by Octave 8.4.0, Tue Oct 27 03:05:32 2026 UTC <ubuntu@cursor>
+# name: fPlot
+# type: double_range
+# base, limit, increment
+100 700 1
+
+
+# name: dMm
+# type: matrix
+# rows: 1
+# columns: 12
+ 8 0.19036157324881048 2.9379474631751297 5.3833744133452415 2.7416573564524191 0.10000000000000001 0.10000000000000001 4.9843164797847921 8 8 8 0.10000000000000001
+
+
+# name: H1mm
+# type: matrix
+# rows: 1
+# columns: 8
+ 62.900653800449462 60.781377513848085 18.939748484430545 80 72.038797593795294 14.17611010294754 80 66.004906221406117
+
+
+# name: H2mm
+# type: matrix
+# rows: 1
+# columns: 8
+ 10 56.893990124783812 22.703872749136472 80 75.716010884969663 10 10 10
+
+
+# name: rep
+# type: scalar struct
+# ndims: 2
+ 1 1
+# length: 12
+# name: f1
+# type: scalar
+194
+
+
+# name: af1
+# type: scalar
+0.9984104717773572
+
+
+# name: ab1
+# type: scalar
+0.01574241421570197
+
+
+# name: Rf1
+# type: scalar
+0.0015894866099664866
+
+
+# name: Rb1
+# type: scalar
+0.9842575441716217
+
+
+# name: T1
+# type: scalar
+4.1612676330416164e-08
+
+
+# name: f2
+# type: scalar
+363
+
+
+# name: af2
+# type: scalar
+0.016160450555197204
+
+
+# name: ab2
+# type: scalar
+0.99918547650939094
+
+
+# name: Rf2
+# type: scalar
+0.98383615366846022
+
+
+# name: Rb2
+# type: scalar
+0.00081112771426655695
+
+
+# name: T2
+# type: scalar
+3.3957763425748754e-06
+
+
+
+
+# name: lossFinal
+# type: scalar
+0.0010244530670962574
+
+

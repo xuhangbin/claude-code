@@ -52,6 +52,11 @@ fPlot = 100:1:700;
 modelTrain = prepareModel(fTrain, const);
 verifyPhysics(const, modelTrain, fTrain);
 
+if strcmp(mode, 'ep')
+    searchEpReversal(const);
+    return;
+end
+
 if strcmp(mode, 'verify') || strcmp(mode, 'bench')
     if strcmp(mode, 'bench')
         benchPhysics(modelTrain, fTrain);
@@ -279,7 +284,7 @@ V = 8 * n0 .* (a ^ 2 .* h / 8 - V1 - V2 - V3);
 Heq = V * 1e-9 / (30e-3 * 30e-3);
 end
 
-function [alphaF, alphaB, energyErr] = origamiResponse(dFlat, hFlat, f, model)
+function [alphaF, alphaB, energyErr, Rf, Rb, Tr] = origamiResponse(dFlat, hFlat, f, model)
 dFlat = asRows(dFlat, 12);
 hFlat = asRows(hFlat, 8);
 if size(dFlat, 1) ~= size(hFlat, 1)
@@ -427,6 +432,10 @@ else
     M = depthsFromRow(v);
 end
 M = M(:, :, 1);
+end
+
+function [af, ab, Rf, Rb, Tr] = acousticPower(dMm, hMm, f, model)
+[af, ab, ~, Rf, Rb, Tr] = origamiResponse(asRows(dMm, 12) * 1e-3, asRows(hMm, 8) * 1e-3, f, model);
 end
 
 function [af, ab, energyErr] = acousticMm(dMm, hMm, f, model)
@@ -1502,6 +1511,108 @@ ab1 = 0.20 - 0.08 * w;
 af2 = 0.18 + 0.10 * w;
 ab2 = 0.16 + 0.64 * w;
 Y = [af1, ab1, af2, ab2];
+end
+
+function searchEpReversal(const)
+fSearch = 100:2:700;
+fPlot = 100:1:700;
+modelSearch = prepareModel(fSearch, const);
+modelPlot = prepareModel(fPlot, const);
+lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
+hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
+fprintf('用传递矩阵搜索单侧完美吸声的频率点，状态2对调两侧。\n');
+bestLoss = inf;
+bestX = [];
+for restart = 1:6
+    fprintf('第 %d / 6 组\n', restart);
+    [xTry, lossTry] = deOptimize( ...
+        @(X) epBatchLoss(X, fSearch, modelSearch), lo, hi, 32, 22, []);
+    fprintf('  损失 %.6f\n', lossTry);
+    if lossTry < bestLoss
+        bestLoss = lossTry;
+        bestX = xTry;
+    end
+end
+bestX = epPolish(bestX, fPlot, modelPlot, const);
+[lossFinal, rep] = epOne(bestX, fPlot, modelPlot);
+fprintf('\n========== 传递矩阵 EP 结果 ==========\n');
+fprintf('总损失 %.6f\n', lossFinal);
+printEp('状态1 正向完美吸声', rep.f1, rep.af1, rep.Rf1, rep.T1, rep.ab1, rep.Rb1);
+printEp('状态2 反向完美吸声', rep.f2, rep.ab2, rep.Rb2, rep.T2, rep.af2, rep.Rf2);
+dMm = bestX(1:12);
+H1mm = bestX(13:20);
+H2mm = bestX(21:28);
+fprintf('孔径 (mm)\n');
+disp(reshape(dMm, 3, 4).');
+fprintf('状态1 腔深 (mm)\n');
+disp(reshape(H1mm, 2, 4).');
+fprintf('状态2 腔深 (mm)\n');
+disp(reshape(H2mm, 2, 4).');
+outDir = fileparts(mfilename('fullpath'));
+if isempty(outDir)
+    outDir = pwd;
+end
+save(fullfile(outDir, 'ep_reversal.mat'), 'fPlot', 'dMm', 'H1mm', 'H2mm', 'rep', 'lossFinal');
+fprintf('参数已保存到 ep_reversal.mat\n');
+end
+
+function loss = epBatchLoss(X, f, model)
+[loss, ~] = epMetrics(X, f, model);
+end
+
+function [loss, info] = epMetrics(X, f, model)
+d = X(:, 1:12);
+[af1, ab1, Rf1, Rb1, T1] = acousticPower(d, X(:, 13:20), f, model);
+[af2, ab2, Rf2, Rb2, T2] = acousticPower(d, X(:, 21:28), f, model);
+c1 = (af1 - 1) .^ 2 + Rf1 .^ 2 + T1 .^ 2 + (Rb1 - 1) .^ 2 + ab1 .^ 2;
+c2 = (ab2 - 1) .^ 2 + Rb2 .^ 2 + T2 .^ 2 + (Rf2 - 1) .^ 2 + af2 .^ 2;
+[best1, i1] = min(c1, [], 2);
+[best2, i2] = min(c2, [], 2);
+bad = ~all(isfinite(c1), 2) | ~all(isfinite(c2), 2);
+loss = best1 + best2;
+loss(bad) = 1e3;
+info.i1 = i1;
+info.i2 = i2;
+info.af1 = af1;
+info.ab1 = ab1;
+info.Rf1 = Rf1;
+info.Rb1 = Rb1;
+info.T1 = T1;
+info.af2 = af2;
+info.ab2 = ab2;
+info.Rf2 = Rf2;
+info.Rb2 = Rb2;
+info.T2 = T2;
+end
+
+function [loss, rep] = epOne(x, f, model)
+[loss, info] = epMetrics(x, f, model);
+k1 = info.i1(1);
+k2 = info.i2(1);
+rep.f1 = f(k1);
+rep.af1 = info.af1(1, k1);
+rep.ab1 = info.ab1(1, k1);
+rep.Rf1 = info.Rf1(1, k1);
+rep.Rb1 = info.Rb1(1, k1);
+rep.T1 = info.T1(1, k1);
+rep.f2 = f(k2);
+rep.af2 = info.af2(1, k2);
+rep.ab2 = info.ab2(1, k2);
+rep.Rf2 = info.Rf2(1, k2);
+rep.Rb2 = info.Rb2(1, k2);
+rep.T2 = info.T2(1, k2);
+end
+
+function x = epPolish(x, f, model, const)
+lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
+hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
+[x, ~] = deOptimize(@(X) epBatchLoss(X, f, model), lo, hi, 20, 12, x);
+end
+
+function printEp(name, freq, aPerfect, rZero, tZero, aZero, rOne)
+fprintf('%s  频率 %.0f Hz\n', name, freq);
+fprintf('  完美吸声侧  吸声 %.4f  反射 %.4f  透射 %.4f\n', aPerfect, rZero, tZero);
+fprintf('  全反射侧    吸声 %.4f  反射 %.4f  透射 %.4f\n', aZero, rOne, tZero);
 end
 
 function g = inputGradient(net, cache, dY)
