@@ -1514,27 +1514,38 @@ Y = [af1, ab1, af2, ab2];
 end
 
 function searchEpReversal(const)
-fSearch = 100:2:700;
+fLock = 400;
 fPlot = 100:1:700;
-modelSearch = prepareModel(fSearch, const);
+modelLock = prepareModel(fLock, const);
 modelPlot = prepareModel(fPlot, const);
 lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
 hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
-fprintf('用传递矩阵搜索同一频率上的两侧对调，并尽量增加这样的频率点。\n');
+fprintf('用传递矩阵把两侧对调锁在 400 Hz：大于 0.99，小于 0.01。\n');
 bestLoss = inf;
 bestX = [];
-for restart = 1:8
-    fprintf('第 %d / 8 组\n', restart);
+savedPath = fullfile(fileparts(mfilename('fullpath')), 'ep_reversal.mat');
+if exist(savedPath, 'file')
+    saved = load(savedPath);
+    if isfield(saved, 'dMm')
+        bestX = [saved.dMm, saved.H1mm, saved.H2mm];
+        bestLoss = epBatchLoss(bestX, fLock, modelLock);
+        fprintf('从已有几何继续，当前损失 %.6f。\n', bestLoss);
+    end
+end
+for restart = 1:3
+    fprintf('第 %d / 3 组\n', restart);
     [xTry, lossTry] = deOptimize( ...
-        @(X) epBatchLoss(X, fSearch, modelSearch), lo, hi, 36, 26, []);
+        @(X) epBatchLoss(X, fLock, modelLock), lo, hi, 48, 35, bestX);
     fprintf('  损失 %.6f\n', lossTry);
     if lossTry < bestLoss
         bestLoss = lossTry;
         bestX = xTry;
     end
 end
-bestX = epPolish(bestX, fPlot, modelPlot, const);
-[lossFinal, rep] = epOne(bestX, fPlot, modelPlot);
+bestX = epIntensify(bestX, fLock, modelLock, const);
+bestX = epCoordinate(bestX, fLock, modelLock, const);
+bestX = epPolish(bestX, fLock, modelLock, const);
+[lossFinal, rep] = epOne(bestX, fLock, modelLock);
 fprintf('\n========== 同一频率上的两侧对调 ==========\n');
 fprintf('最好频率 %.0f Hz，联合损失 %.6f，达标频率点 %d 个\n', ...
     rep.f1, lossFinal, rep.nGood);
@@ -1580,8 +1591,8 @@ nKeep = min(5, size(js, 2));
 bestJoint = js(:, 1);
 spread = mean(js(:, 1:nKeep), 2);
 [~, iSame] = min(joint, [], 2);
-good = af1 >= 0.95 & Rf1 <= 0.05 & T1 <= 0.05 & Rb1 >= 0.95 & ab1 <= 0.05 ...
-    & ab2 >= 0.95 & Rb2 <= 0.05 & T2 <= 0.05 & Rf2 >= 0.95 & af2 <= 0.05;
+good = af1 >= 0.99 & Rf1 <= 0.01 & T1 <= 0.01 & Rb1 >= 0.99 & ab1 <= 0.01 ...
+    & ab2 >= 0.99 & Rb2 <= 0.01 & T2 <= 0.01 & Rf2 >= 0.99 & af2 <= 0.01;
 nGood = sum(good, 2);
 bad = ~all(isfinite(joint), 2);
 loss = bestJoint + 0.08 * spread - 0.01 * nGood;
@@ -1619,6 +1630,56 @@ rep.Rb2 = info.Rb2(1, k);
 rep.T2 = info.T2(1, k);
 rep.nGood = info.nGood(1);
 rep.goodF = f(info.good(1, :));
+end
+
+function x = epIntensify(x, f, model, const)
+lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
+hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
+step = [1.5 * ones(1, 12), 6 * ones(1, 16)];
+[baseLoss, ~] = epOne(x, f, model);
+for scale = [0.35, 0.12, 0.04, 0.015, 0.005]
+    for roundId = 1:6
+        cloud = x + randn(120, numel(x)) .* (step * scale);
+        cloud = min(max(cloud, lo), hi);
+        cloud = [x; cloud]; %#ok<AGROW>
+        loss = epBatchLoss(cloud, f, model);
+        [bestLoss, key] = min(loss);
+        if bestLoss + 1e-8 < baseLoss
+            x = cloud(key, :);
+            baseLoss = bestLoss;
+        end
+    end
+    fprintf('  局部尺度 %.2f  损失 %.6f\n', scale, baseLoss);
+end
+end
+
+function x = epCoordinate(x, f, model, const)
+lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
+hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
+base = [0.4 * ones(1, 12), 1.5 * ones(1, 16)];
+for scale = [1, 0.3, 0.1, 0.03]
+    step = base * scale;
+    improved = true;
+    while improved
+        improved = false;
+        trials = zeros(0, numel(x));
+        for j = 1:numel(x)
+            xp = x;
+            xm = x;
+            xp(j) = min(hi(j), x(j) + step(j));
+            xm(j) = max(lo(j), x(j) - step(j));
+            trials = [trials; xp; xm]; %#ok<AGROW>
+        end
+        loss = epBatchLoss(trials, f, model);
+        current = epBatchLoss(x, f, model);
+        [bestLoss, key] = min(loss);
+        if bestLoss + 1e-10 < current
+            x = trials(key, :);
+            improved = true;
+        end
+    end
+    fprintf('  坐标尺度 %.2f  损失 %.6f\n', scale, epBatchLoss(x, f, model));
+end
 end
 
 function x = epPolish(x, f, model, const)
