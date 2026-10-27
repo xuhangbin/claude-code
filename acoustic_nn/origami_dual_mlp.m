@@ -1520,13 +1520,13 @@ modelSearch = prepareModel(fSearch, const);
 modelPlot = prepareModel(fPlot, const);
 lo = [const.dMin * ones(1, 12), const.Hmin * ones(1, 16)];
 hi = [const.dMax * ones(1, 12), const.Hmax * ones(1, 16)];
-fprintf('用传递矩阵搜索单侧完美吸声的频率点，状态2对调两侧。\n');
+fprintf('用传递矩阵搜索同一频率上的两侧对调，并尽量增加这样的频率点。\n');
 bestLoss = inf;
 bestX = [];
-for restart = 1:6
-    fprintf('第 %d / 6 组\n', restart);
+for restart = 1:8
+    fprintf('第 %d / 8 组\n', restart);
     [xTry, lossTry] = deOptimize( ...
-        @(X) epBatchLoss(X, fSearch, modelSearch), lo, hi, 32, 22, []);
+        @(X) epBatchLoss(X, fSearch, modelSearch), lo, hi, 36, 26, []);
     fprintf('  损失 %.6f\n', lossTry);
     if lossTry < bestLoss
         bestLoss = lossTry;
@@ -1535,10 +1535,18 @@ for restart = 1:6
 end
 bestX = epPolish(bestX, fPlot, modelPlot, const);
 [lossFinal, rep] = epOne(bestX, fPlot, modelPlot);
-fprintf('\n========== 传递矩阵 EP 结果 ==========\n');
-fprintf('总损失 %.6f\n', lossFinal);
-printEp('状态1 正向完美吸声', rep.f1, rep.af1, rep.Rf1, rep.T1, rep.ab1, rep.Rb1);
-printEp('状态2 反向完美吸声', rep.f2, rep.ab2, rep.Rb2, rep.T2, rep.af2, rep.Rf2);
+fprintf('\n========== 同一频率上的两侧对调 ==========\n');
+fprintf('最好频率 %.0f Hz，联合损失 %.6f，达标频率点 %d 个\n', ...
+    rep.f1, lossFinal, rep.nGood);
+fprintf('状态1  正向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.af1, rep.Rf1, rep.T1);
+fprintf('状态1  反向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.ab1, rep.Rb1, rep.T1);
+fprintf('状态2  正向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.af2, rep.Rf2, rep.T2);
+fprintf('状态2  反向吸声 %.4f  反射 %.4f  透射 %.4f\n', rep.ab2, rep.Rb2, rep.T2);
+if rep.nGood > 0
+    fprintf('这些频率上两侧同时对调：');
+    fprintf(' %.0f', rep.goodF);
+    fprintf(' Hz\n');
+end
 dMm = bestX(1:12);
 H1mm = bestX(13:20);
 H2mm = bestX(21:28);
@@ -1566,13 +1574,22 @@ d = X(:, 1:12);
 [af2, ab2, Rf2, Rb2, T2] = acousticPower(d, X(:, 21:28), f, model);
 c1 = (af1 - 1) .^ 2 + Rf1 .^ 2 + T1 .^ 2 + (Rb1 - 1) .^ 2 + ab1 .^ 2;
 c2 = (ab2 - 1) .^ 2 + Rb2 .^ 2 + T2 .^ 2 + (Rf2 - 1) .^ 2 + af2 .^ 2;
-[best1, i1] = min(c1, [], 2);
-[best2, i2] = min(c2, [], 2);
-bad = ~all(isfinite(c1), 2) | ~all(isfinite(c2), 2);
-loss = best1 + best2;
+joint = c1 + c2;
+js = sort(joint, 2);
+nKeep = min(5, size(js, 2));
+bestJoint = js(:, 1);
+spread = mean(js(:, 1:nKeep), 2);
+[~, iSame] = min(joint, [], 2);
+good = af1 >= 0.95 & Rf1 <= 0.05 & T1 <= 0.05 & Rb1 >= 0.95 & ab1 <= 0.05 ...
+    & ab2 >= 0.95 & Rb2 <= 0.05 & T2 <= 0.05 & Rf2 >= 0.95 & af2 <= 0.05;
+nGood = sum(good, 2);
+bad = ~all(isfinite(joint), 2);
+loss = bestJoint + 0.08 * spread - 0.01 * nGood;
 loss(bad) = 1e3;
-info.i1 = i1;
-info.i2 = i2;
+info.i1 = iSame;
+info.i2 = iSame;
+info.nGood = nGood;
+info.good = good;
 info.af1 = af1;
 info.ab1 = ab1;
 info.Rf1 = Rf1;
@@ -1587,20 +1604,21 @@ end
 
 function [loss, rep] = epOne(x, f, model)
 [loss, info] = epMetrics(x, f, model);
-k1 = info.i1(1);
-k2 = info.i2(1);
-rep.f1 = f(k1);
-rep.af1 = info.af1(1, k1);
-rep.ab1 = info.ab1(1, k1);
-rep.Rf1 = info.Rf1(1, k1);
-rep.Rb1 = info.Rb1(1, k1);
-rep.T1 = info.T1(1, k1);
-rep.f2 = f(k2);
-rep.af2 = info.af2(1, k2);
-rep.ab2 = info.ab2(1, k2);
-rep.Rf2 = info.Rf2(1, k2);
-rep.Rb2 = info.Rb2(1, k2);
-rep.T2 = info.T2(1, k2);
+k = info.i1(1);
+rep.f1 = f(k);
+rep.f2 = f(k);
+rep.af1 = info.af1(1, k);
+rep.ab1 = info.ab1(1, k);
+rep.Rf1 = info.Rf1(1, k);
+rep.Rb1 = info.Rb1(1, k);
+rep.T1 = info.T1(1, k);
+rep.af2 = info.af2(1, k);
+rep.ab2 = info.ab2(1, k);
+rep.Rf2 = info.Rf2(1, k);
+rep.Rb2 = info.Rb2(1, k);
+rep.T2 = info.T2(1, k);
+rep.nGood = info.nGood(1);
+rep.goodF = f(info.good(1, :));
 end
 
 function x = epPolish(x, f, model, const)
