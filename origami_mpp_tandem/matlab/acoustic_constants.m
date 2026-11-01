@@ -1,0 +1,19 @@
+function const = acoustic_constants()
+const.rho0 = 1.29;
+const.c0 = 343;
+const.eta = 1.89e-5;
+const.kappa = 0.026;
+const.Cv = 712;
+const.gamma = 1.4;
+const.P0 = const.rho0 * const.c0^2 / const.gamma;
+const.Z0 = const.rho0 * const.c0;
+const.nu = const.eta / const.rho0;
+const.mu = const.kappa / (const.rho0 * const.Cv);
+const.W = 30e-3;
+const.L = 30e-3;
+const.S = const.W * const.L;
+const.dMin = 1e-3;
+const.dMax = 8e-3;
+const.hMin = 5e-3;
+const.hMax = 80e-3;
+end
