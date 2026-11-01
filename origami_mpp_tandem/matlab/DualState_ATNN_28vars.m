@@ -3,10 +3,10 @@ clc;
 close all;
 
 % 本文件自带全部子函数。无论当前文件夹在哪里，只要运行本脚本即可。
-% 逆网络输入是声学状态 [中心频率Hz, 带宽目标Hz, 最小吸声系数, 带宽类型]
-% 带宽类型 -1：带宽低于目标；+1：带宽高于目标。
-% 状态1：400 Hz，带宽目标 40 Hz（小于 50 Hz），最小吸声系数 0.5
-% 状态2：400 Hz，带宽目标 230 Hz（大于 200 Hz），最小吸声系数 0.5
+% 逆网络输入是声学状态 [中心频率Hz, 带宽目标Hz, 最小吸声系数, 带宽类型]。
+% 两个状态共用 12 个孔径，腔高各有一套，一共 28 个设计量。
+% 状态1（窄带）：同时优化 12 个孔径和 8 个腔高。
+% 状态2（宽带）：12 个孔径锁定，只重新优化 8 个腔高。
 % 需要 MATLAB R2020b 及以上（pagemtimes）。
 
 freq = (100:2:700).';
@@ -16,19 +16,30 @@ state = [
     400, 40,  0.5, -1
     400, 230, 0.5,  1
 ];
-stateName = {'状态1 窄带', '状态2 宽带'};
+stateName = {'状态1 窄带：12孔+8腔', '状态2 宽带：孔固定，只调8腔'};
 
 model = train_state_tandem(freq, fluid, 1200);
 thisDir = fileparts(mfilename('fullpath'));
+if isempty(thisDir)
+    thisDir = pwd;
+end
 save(fullfile(thisDir, 'state_tandem.mat'), 'model', 'state');
 
+fprintf('%s\n', stateName{1});
+guess1 = propose_state(model, state(1, :));
+theta1 = refine_state(state(1, :), guess1, freq, fluid);
+dFixed = theta1(1:12);
+H1 = theta1(13:20);
+
+fprintf('%s\n', stateName{2});
+guess2 = propose_state(model, state(2, :));
+H2 = refine_heights(state(2, :), dFixed, guess2(13:20), freq, fluid);
+
+found = [dFixed, H1, H2];
 alpha = zeros(2, numel(freq));
-found = zeros(2, 20);
+alpha(1, :) = mpp_absorption([dFixed, H1], freq, fluid);
+alpha(2, :) = mpp_absorption([dFixed, H2], freq, fluid);
 for i = 1:2
-    fprintf('%s\n', stateName{i});
-    guess = propose_state(model, state(i, :));
-    found(i, :) = refine_state(state(i, :), guess, freq, fluid);
-    alpha(i, :) = mpp_absorption(found(i, :), freq, fluid);
     [fPeak, bandwidth, aPeak] = measure_state(freq, alpha(i, :), state(i, 3));
     fprintf('  峰值 %.1f Hz，带宽 %.1f Hz，峰值吸声 %.3f\n', fPeak, bandwidth, aPeak);
 end
@@ -52,7 +63,55 @@ for i = 1:2
     set(gca, 'FontName', 'Times New Roman', 'FontSize', 14, 'LineWidth', 1.1, 'TickDir', 'in');
 end
 saveas(gcf, fullfile(thisDir, 'narrow_to_wide.png'));
-save(fullfile(thisDir, 'narrow_to_wide_design.mat'), 'found', 'alpha', 'freq', 'state');
+save(fullfile(thisDir, 'narrow_to_wide_design.mat'), 'found', 'alpha', 'freq', 'state', 'dFixed', 'H1', 'H2');
+
+function H = refine_heights(state, dFixed, H0, freq, fluid)
+% 孔径 dFixed 不参与更新，只搜索 8 个腔高。
+[low, high] = parameter_bounds();
+hLow = low(13:20);
+hHigh = high(13:20);
+popSize = 24;
+generations = 18;
+population = hLow + rand(popSize, 8) .* (hHigh - hLow);
+if ~isempty(H0)
+    population(1, :) = min(max(H0(:).', hLow), hHigh);
+end
+cost = height_cost(population);
+[bestCost, bestIdx] = min(cost);
+best = population(bestIdx, :);
+fprintf('  只调腔高，初始损失 %.4f\n', bestCost);
+for generation = 1:generations
+    trial = population;
+    for i = 1:popSize
+        ids = randperm(popSize, 3);
+        mutant = population(ids(1), :) + 0.6 * (population(ids(2), :) - population(ids(3), :));
+        cross = rand(1, 8) < 0.7;
+        cross(randi(8)) = true;
+        candidate = population(i, :);
+        candidate(cross) = mutant(cross);
+        candidate = min(max(candidate, hLow), hHigh);
+        trial(i, :) = candidate;
+    end
+    trialCost = height_cost(trial);
+    better = trialCost < cost;
+    population(better, :) = trial(better, :);
+    cost(better) = trialCost(better);
+    [genBest, genIdx] = min(cost);
+    if genBest < bestCost
+        bestCost = genBest;
+        best = population(genIdx, :);
+    end
+end
+fprintf('  只调腔高，修完损失 %.4f\n', bestCost);
+H = best;
+
+    function value = height_cost(batchH)
+        n = size(batchH, 1);
+        theta = [repmat(dFixed, n, 1), batchH];
+        spectrum = mpp_absorption(theta, freq, fluid);
+        value = state_loss(freq, spectrum, state);
+    end
+end
 
 
 %% ===== acoustic_constants.m =====
