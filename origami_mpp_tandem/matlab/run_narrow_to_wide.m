@@ -13,7 +13,12 @@ close all;
 %   状态2 宽带：中心 400 Hz，带宽目标 230 Hz，因此会大于 200 Hz，峰值至少 0.5
 
 % 需要 MATLAB R2020b 或更新版本（用到 pagemtimes）。
+% 若只把本脚本另存到别的文件夹，stinson_fluid 会找不到。
+% 请改运行同目录下的 DualState_ATNN_28vars.m，那个文件自带全部子函数。
 thisDir = fileparts(mfilename('fullpath'));
+if ~isfile(fullfile(thisDir, 'stinson_fluid.m'))
+    error(['找不到 stinson_fluid.m。请运行 DualState_ATNN_28vars.m，或把整个 matlab 文件夹设为当前文件夹。当前脚本目录：' thisDir]);
+end
 addpath(thisDir);
 
 freq = (100:2:700).';
