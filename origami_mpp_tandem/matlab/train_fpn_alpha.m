@@ -25,7 +25,7 @@ lambdaAlpha = 1;
 numEpochs = 80;
 miniBatchSize = 2048;
 freqPerGeometry = 32;
-initialLearnRate = 1e-3;
+initialLearnRate = 1e-4;
 
 rho0 = 1.29;
 c0 = 343;
@@ -481,10 +481,9 @@ scale = dlarray(yRange(:), 'C');
 shift = dlarray(yMin(:), 'C');
 phys = predN .* scale + shift;
 [af, ab] = alphaRows(phys);
-
-alphaLoss = 0.5 * ( ...
-    mean((af - dlAlpha(1, :)) .^ 2, 'all') + ...
-    mean((ab - dlAlpha(2, :)) .^ 2, 'all'));
+ea2 = min((af - dlAlpha(1, :)) .^ 2, 1);
+eb2 = min((ab - dlAlpha(2, :)) .^ 2, 1);
+alphaLoss = 0.5 * (mean(ea2, 'all') + mean(eb2, 'all'));
 
 loss = matrixLoss + lambdaAlpha * alphaLoss;
 gradients = dlgradient(loss, net.Learnables);
@@ -532,9 +531,9 @@ for first = 1:batchSize:N
     [af, ab] = acousticResponse(phys);
 
     matrixLoss = mean((predN - target) .^ 2, 'all');
-    alphaLoss = 0.5 * ( ...
-        mean((af - double(Alpha(first:last, 1))) .^ 2) + ...
-        mean((ab - double(Alpha(first:last, 2))) .^ 2));
+    ea = af - double(Alpha(first:last, 1));
+    eb = ab - double(Alpha(first:last, 2));
+    alphaLoss = 0.5 * (mean(min(ea .^ 2, 1)) + mean(min(eb .^ 2, 1)));
     totalLoss = totalLoss + (matrixLoss + lambdaAlpha * alphaLoss) * (last - first + 1);
 end
 
