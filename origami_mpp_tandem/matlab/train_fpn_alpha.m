@@ -1,5 +1,4 @@
-function train_fpn_alpha()
-% 单胞正向网络。
+% 单胞正向网络。保存为 ruanhua_shenjing.m 后直接运行。
 % 输入：3 个孔径(mm)、2 个腔高(mm)、1 个频率(Hz)。
 % 输出：A、B/Z0、C*Z0、D 的实部和虚部。
 % 损失：归一化矩阵的均方误差 + 原始传递矩阵吸声的均方误差。
@@ -197,8 +196,9 @@ net = dlnetwork(layers);
 
 %% 8. 固定验证样本：每隔 10 Hz，再加正反向吸声峰及其相邻点
 
-valFrequency = unique([1:10:Nf, peakNeighbors(peakForward(idVal), Nf), ...
-    peakNeighbors(peakBackward(idVal), Nf)]);
+peakIds = [peakNeighbors(peakForward(idVal), Nf); ...
+    peakNeighbors(peakBackward(idVal), Nf)];
+valFrequency = unique([1:10:Nf, peakIds(:)']);
 nValGeometry = min(300, numel(idVal));
 valGeometry = idVal(randperm(numel(idVal), nValGeometry));
 
@@ -358,7 +358,6 @@ save('Origami_FPN_Final_Results.mat', ...
     '-v7.3');
 
 fprintf('\nAll calculations completed.\n');
-end
 
 %% 局部函数
 
